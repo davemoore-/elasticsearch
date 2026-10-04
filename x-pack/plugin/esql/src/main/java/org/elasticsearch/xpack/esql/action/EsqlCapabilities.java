@@ -4289,6 +4289,15 @@ public class EsqlCapabilities {
          */
         FIX_PARSING_SUBOBJECTS_FALSE_DYNAMIC_FALSE,
 
+        /**
+         * PromQL carries each series' one {@code _timeseries} and unsets the labels a {@code without} or a classic histogram's
+         * {@code le} drops from it ({@code TimeSeriesUnset}). Reported by nodes that can run it; a query only takes this path
+         * once every node it reaches does. {@code without} over every label then yields the empty identity, where older
+         * nodes yield the whole source document, and a {@code without} over a classic histogram plans, where older
+         * nodes would need two {@code _timeseries} on one node.
+         */
+        PROMQL_TIMESERIES_METADATA_UNSET,
+
         // Last capability should still have a comma for fewer merge conflicts when adding new ones :)
         // This comment prevents the semicolon from being on the previous capability when Spotless formats the file.
         ;
