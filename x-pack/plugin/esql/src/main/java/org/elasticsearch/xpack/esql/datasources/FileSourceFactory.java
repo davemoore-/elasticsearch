@@ -844,7 +844,6 @@ final class FileSourceFactory implements ExternalSourceFactory {
             return inner().exists(path);
         }
 
-
         @Override
         public List<String> supportedSchemes() {
             return inner().supportedSchemes();

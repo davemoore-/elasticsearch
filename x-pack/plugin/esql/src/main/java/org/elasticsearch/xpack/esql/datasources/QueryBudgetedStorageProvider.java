@@ -65,7 +65,6 @@ class QueryBudgetedStorageProvider implements StorageProvider {
         return delegate.exists(path);
     }
 
-
     @Override
     public List<String> supportedSchemes() {
         return delegate.supportedSchemes();

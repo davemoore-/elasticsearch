@@ -53,7 +53,6 @@ import org.elasticsearch.xpack.esql.datasource.csv.CsvFormatReader;
 import org.elasticsearch.xpack.esql.datasource.ndjson.NdJsonFormatReader;
 import org.elasticsearch.xpack.esql.datasources.cache.ExternalSourceCacheService;
 import org.elasticsearch.xpack.esql.datasources.cache.ExternalStats;
-import org.elasticsearch.xpack.esql.datasources.cache.FileMetadataCacheKey;
 import org.elasticsearch.xpack.esql.datasources.cache.ListingCacheKey;
 import org.elasticsearch.xpack.esql.datasources.cache.ReadConfigFingerprint;
 import org.elasticsearch.xpack.esql.datasources.cache.SchemaCacheEntry;
@@ -5971,11 +5970,12 @@ public class ExternalSourceResolverTests extends ESTestCase {
     }
 
     /**
-     * A warm single-file resolve must be zero-I/O: the file-metadata cache holds {length, mtime} within
-     * the file-metadata TTL, so the second resolve reuses the cached metadata and issues no object probe.
-     * This is the amortization lever removing the per-query warm-path metadata probe.
+     * Every resolve probes the object, warm or cold. The probe is the only point that asks storage whether
+     * this query's credentials can read it, and that answer cannot be carried over from an earlier query: a
+     * credential's entitlement can be withdrawn without any component of any cache key moving. The schema and
+     * statistics are still shared across resolves — only the proof is retaken.
      */
-    public void testSingleFileMetadataCacheEliminatesWarmProbe() throws Exception {
+    public void testEveryResolveProbesTheObject() throws Exception {
         List<Attribute> schema = List.of(attr("id", DataType.INTEGER), attr("name", DataType.KEYWORD));
         Map<String, List<Attribute>> schemasByPath = new HashMap<>();
         schemasByPath.put("s3://bucket/data/single.parquet", schema);
@@ -5994,65 +5994,21 @@ public class ExternalSourceResolverTests extends ESTestCase {
             PlainActionFuture<ExternalSourceResolution> f1 = new PlainActionFuture<>();
             resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), f1);
             assertNotNull(f1.actionGet().resolvedSource("s3://bucket/data/single.parquet"));
-            assertEquals("cold resolve probes the object exactly once", 1, countingProvider.metadataProbeCount.get());
-
-            Map<String, Object> stats1 = cacheService.usageStats();
-            assertEquals(1L, stats1.get("file_metadata_cache.misses"));
-            assertEquals(0L, stats1.get("file_metadata_cache.hits"));
-            assertEquals(1, stats1.get("file_metadata_cache.count"));
+            assertEquals("cold resolve probes the object", 1, countingProvider.metadataProbeCount.get());
+            assertEquals("the cold resolve is a schema miss", 1L, cacheService.usageStats().get("schema_cache.misses"));
 
             PlainActionFuture<ExternalSourceResolution> f2 = new PlainActionFuture<>();
             resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), f2);
             ExternalSourceResolution res2 = f2.actionGet();
             assertNotNull(res2.resolvedSource("s3://bucket/data/single.parquet"));
             assertEquals(1, res2.resolvedSource("s3://bucket/data/single.parquet").fileList().fileCount());
-            assertEquals("warm resolve issues zero additional probes", 1, countingProvider.metadataProbeCount.get());
-
-            Map<String, Object> stats2 = cacheService.usageStats();
-            assertEquals(1L, stats2.get("file_metadata_cache.misses"));
-            assertEquals(1L, stats2.get("file_metadata_cache.hits"));
-            assertEquals(1, stats2.get("file_metadata_cache.count"));
-        }
-    }
-
-    /**
-     * The file-metadata cache is bounded by a hard {@code expireAfterWrite} TTL (the listing TTL, since it
-     * is freshness-discovery like listing), so once the entry expires the next resolve must re-probe the
-     * object — mtime is a version token, not a second freshness clock, and staleness is bounded by the TTL.
-     */
-    public void testSingleFileMetadataCacheReprobesAfterTtlExpiry() throws Exception {
-        List<Attribute> schema = List.of(attr("id", DataType.INTEGER));
-        Map<String, List<Attribute>> schemasByPath = new HashMap<>();
-        schemasByPath.put("s3://bucket/data/single.parquet", schema);
-
-        CountingStorageProvider countingProvider = new CountingStorageProvider(Map.of(), schemasByPath);
-
-        // The file-metadata cache is freshness-discovery (like listing) and shares the listing TTL, so a
-        // short listing TTL is what expires it and forces the re-probe.
-        Settings settings = Settings.builder()
-            .put("esql.external.cache.size", "10mb")
-            .put("esql.external.cache.enabled", true)
-            .put("esql.external.cache.listing.ttl", "500ms")
-            .build();
-
-        try (ExternalSourceCacheService cacheService = new ExternalSourceCacheService(settings)) {
-            ExternalSourceResolver resolver = createResolverWithCache(countingProvider, schemasByPath, cacheService);
-
-            PlainActionFuture<ExternalSourceResolution> f1 = new PlainActionFuture<>();
-            resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), f1);
-            assertNotNull(f1.actionGet().resolvedSource("s3://bucket/data/single.parquet"));
-            assertEquals(1, countingProvider.metadataProbeCount.get());
-
-            // Let the entry expire (it remains lazily cached but is TTL-dead), then resolve again.
-            Thread.sleep(1200);
-
-            PlainActionFuture<ExternalSourceResolution> f2 = new PlainActionFuture<>();
-            resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), f2);
-            assertNotNull(f2.actionGet().resolvedSource("s3://bucket/data/single.parquet"));
-            assertEquals("expired metadata entry must be re-probed", 2, countingProvider.metadataProbeCount.get());
-
-            Map<String, Object> stats = cacheService.usageStats();
-            assertEquals(2L, stats.get("file_metadata_cache.misses"));
+            assertEquals("warm resolve probes again", 2, countingProvider.metadataProbeCount.get());
+            assertEquals(
+                "the schema still comes from the cache: the probe is retaken, the derived facts are not",
+                1L,
+                cacheService.usageStats().get("schema_cache.hits")
+            );
+            assertEquals("and no second schema miss", 1L, cacheService.usageStats().get("schema_cache.misses"));
         }
     }
 
@@ -6122,7 +6078,6 @@ public class ExternalSourceResolverTests extends ESTestCase {
             assertEquals("schema cache should have no entries when disabled", 0, stats.get("schema_cache.count"));
             assertEquals("schema cache should have no hits when disabled", 0L, stats.get("schema_cache.hits"));
             assertEquals("schema cache should have no misses when disabled", 0L, stats.get("schema_cache.misses"));
-            assertEquals("file-metadata cache should have no entries when disabled", 0, stats.get("file_metadata_cache.count"));
             assertEquals(
                 "disabled cache must not eliminate the probe — one probe per resolve",
                 3,
@@ -9497,20 +9452,6 @@ public class ExternalSourceResolverTests extends ESTestCase {
             ExternalSourceResolver.storageConfig(configB)
         );
         assertEquals("flattened config: credential-independent schema cache invariant must still hold", flatA, flatB);
-    }
-
-    public void testFileMetadataCacheKeyDifferentiatesByStorageIdentity() {
-        // The endpoint reaches this key one way, and it is not the key reading the config for it: the provider
-        // reports what identifies the objects it reads, and an endpoint is one of the settings it names.
-        FileMetadataCacheKey rawA = new FileMetadataCacheKey(
-            "s3://bucket/file.csv",
-            Configured.identityOf(Map.of("endpoint", "http://endpoint-a.example.com"), Set.of("endpoint"))
-        );
-        FileMetadataCacheKey rawB = new FileMetadataCacheKey(
-            "s3://bucket/file.csv",
-            Configured.identityOf(Map.of("endpoint", "http://endpoint-b.example.com"), Set.of("endpoint"))
-        );
-        assertNotEquals("distinct storage identities must address distinct file-metadata entries", rawA, rawB);
     }
 
     /**

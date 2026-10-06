@@ -62,6 +62,42 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
             .build();
     }
 
+    /**
+     * The listing cache expires on a clock, because a listing is freshness discovery: what a prefix holds
+     * changes without anything the key can see. (Its file-metadata counterpart was removed with that cache —
+     * length and mtime now come from the per-resolve probe, so there is no entry to age.)
+     */
+    public void testListingExpiresAfterWrite() throws Exception {
+        Settings settings = Settings.builder()
+            .put("esql.external.cache.size", "10mb")
+            .put("esql.external.cache.enabled", true)
+            .put("esql.external.cache.listing.ttl", "200ms")
+            .build();
+        try (ExternalSourceCacheService service = new ExternalSourceCacheService(settings)) {
+            AtomicInteger listingLoads = new AtomicInteger();
+            ListingCacheKey listingKey = ListingCacheKey.build("s3", "bucket", "/data/*.parquet", "", "", Map.of(), "");
+
+            service.getOrComputeListing(listingKey, k -> {
+                listingLoads.incrementAndGet();
+                return testCompactFileList();
+            });
+            service.getOrComputeListing(listingKey, k -> {
+                listingLoads.incrementAndGet();
+                return testCompactFileList();
+            });
+            assertEquals("the second lookup is a hit", 1, listingLoads.get());
+
+            assertBusy(() -> {
+                int before = listingLoads.get();
+                service.getOrComputeListing(listingKey, k -> {
+                    listingLoads.incrementAndGet();
+                    return testCompactFileList();
+                });
+                assertEquals(before + 1, listingLoads.get());
+            });
+        }
+    }
+
     public void testSchemaHitMiss() throws Exception {
         try (ExternalSourceCacheService service = new ExternalSourceCacheService(defaultSettings())) {
             AtomicInteger loaderCalls = new AtomicInteger();
@@ -200,76 +236,6 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
         } finally {
             exec.shutdownNow();
             service.close();
-        }
-    }
-
-    /**
-     * Expire-after-write, not after access: once the configured TTL passes, the next call re-lists exactly
-     * once and the call after that is a hit again. File metadata shares the same TTL.
-     */
-    public void testListingAndFileMetadataExpireAfterWrite() throws Exception {
-        Settings settings = Settings.builder()
-            .put("esql.external.cache.size", "10mb")
-            .put("esql.external.cache.enabled", true)
-            .put("esql.external.cache.listing.ttl", "200ms")
-            .build();
-        try (ExternalSourceCacheService service = new ExternalSourceCacheService(settings)) {
-            AtomicInteger listingLoads = new AtomicInteger();
-            AtomicInteger metadataLoads = new AtomicInteger();
-            ListingCacheKey listingKey = ListingCacheKey.build("s3", "bucket", "/data/*.parquet", "", "", Map.of(), "");
-            FileMetadataCacheKey metadataKey = new FileMetadataCacheKey("s3://bucket/data/file.parquet", "");
-
-            service.getOrComputeListing(listingKey, k -> {
-                listingLoads.incrementAndGet();
-                return testCompactFileList();
-            });
-            service.getOrComputeFileMetadata(metadataKey, k -> {
-                metadataLoads.incrementAndGet();
-                return new FileMetadata(1L, 1L);
-            });
-            service.getOrComputeListing(listingKey, k -> {
-                listingLoads.incrementAndGet();
-                return testCompactFileList();
-            });
-            service.getOrComputeFileMetadata(metadataKey, k -> {
-                metadataLoads.incrementAndGet();
-                return new FileMetadata(1L, 1L);
-            });
-            assertEquals(1, listingLoads.get());
-            assertEquals(1, metadataLoads.get());
-
-            // Separate waits: the two entries were written a moment apart, so one can expire while the
-            // other is still fresh. A shared attempt would refresh the expired one and then fail the
-            // assertion, leaving a new TTL that the retry would treat as a hit.
-            assertBusy(() -> {
-                int before = listingLoads.get();
-                service.getOrComputeListing(listingKey, k -> {
-                    listingLoads.incrementAndGet();
-                    return testCompactFileList();
-                });
-                assertEquals(before + 1, listingLoads.get());
-            });
-            assertBusy(() -> {
-                int before = metadataLoads.get();
-                service.getOrComputeFileMetadata(metadataKey, k -> {
-                    metadataLoads.incrementAndGet();
-                    return new FileMetadata(1L, 1L);
-                });
-                assertEquals(before + 1, metadataLoads.get());
-            });
-
-            int listingsAfterExpiry = listingLoads.get();
-            int metadataAfterExpiry = metadataLoads.get();
-            service.getOrComputeListing(listingKey, k -> {
-                listingLoads.incrementAndGet();
-                return testCompactFileList();
-            });
-            service.getOrComputeFileMetadata(metadataKey, k -> {
-                metadataLoads.incrementAndGet();
-                return new FileMetadata(1L, 1L);
-            });
-            assertEquals(listingsAfterExpiry, listingLoads.get());
-            assertEquals(metadataAfterExpiry, metadataLoads.get());
         }
     }
 
@@ -596,117 +562,6 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
 
             stats = service.usageStats();
             assertEquals(1, stats.get("schema_cache.count"));
-        }
-    }
-
-    public void testFileMetadataHitMiss() throws Exception {
-        try (ExternalSourceCacheService service = new ExternalSourceCacheService(defaultSettings())) {
-            AtomicInteger loaderCalls = new AtomicInteger();
-            FileMetadataCacheKey key = new FileMetadataCacheKey("s3://bucket/data/file.parquet", "");
-
-            FileMetadata meta1 = service.getOrComputeFileMetadata(key, k -> {
-                loaderCalls.incrementAndGet();
-                return new FileMetadata(4096L, 1000L);
-            });
-            assertEquals(4096L, meta1.length());
-            assertEquals(1000L, meta1.mtimeMillis());
-            assertEquals(1, loaderCalls.get());
-
-            FileMetadata meta2 = service.getOrComputeFileMetadata(key, k -> {
-                loaderCalls.incrementAndGet();
-                return new FileMetadata(9999L, 2000L);
-            });
-            assertSame(meta1, meta2);
-            assertEquals("warm hit must not invoke the loader", 1, loaderCalls.get());
-
-            Map<String, Object> stats = service.usageStats();
-            assertEquals(1, stats.get("file_metadata_cache.count"));
-            assertEquals(1L, stats.get("file_metadata_cache.misses"));
-            assertEquals(1L, stats.get("file_metadata_cache.hits"));
-        }
-    }
-
-    public void testFileMetadataDisabledBypassesCache() throws Exception {
-        try (ExternalSourceCacheService service = new ExternalSourceCacheService(defaultSettings())) {
-            service.setEnabled(false);
-            AtomicInteger loaderCalls = new AtomicInteger();
-            FileMetadataCacheKey key = new FileMetadataCacheKey("s3://bucket/data/file.parquet", "");
-
-            service.getOrComputeFileMetadata(key, k -> {
-                loaderCalls.incrementAndGet();
-                return new FileMetadata(1L, 1L);
-            });
-            service.getOrComputeFileMetadata(key, k -> {
-                loaderCalls.incrementAndGet();
-                return new FileMetadata(1L, 1L);
-            });
-            assertEquals("disabled cache calls the loader every time", 2, loaderCalls.get());
-            assertEquals(0, service.usageStats().get("file_metadata_cache.count"));
-        }
-    }
-
-    public void testFileMetadataDifferentEndpointSeparateEntries() throws Exception {
-        try (ExternalSourceCacheService service = new ExternalSourceCacheService(defaultSettings())) {
-            AtomicInteger loaderCalls = new AtomicInteger();
-            // Two providers that say they address different objects. The endpoint is no longer read out of the
-            // config here: the provider reports what identifies what it reads, and this key carries that.
-            FileMetadataCacheKey key1 = new FileMetadataCacheKey(
-                "s3://bucket/data/file.parquet",
-                Configured.identityOf(Map.of("endpoint", "us-east-1.amazonaws.com"), Set.of("endpoint"))
-            );
-            FileMetadataCacheKey key2 = new FileMetadataCacheKey(
-                "s3://bucket/data/file.parquet",
-                Configured.identityOf(Map.of("endpoint", "eu-west-1.amazonaws.com"), Set.of("endpoint"))
-            );
-            assertNotEquals(key1, key2);
-
-            service.getOrComputeFileMetadata(key1, k -> {
-                loaderCalls.incrementAndGet();
-                return new FileMetadata(1L, 1L);
-            });
-            service.getOrComputeFileMetadata(key2, k -> {
-                loaderCalls.incrementAndGet();
-                return new FileMetadata(2L, 2L);
-            });
-            assertEquals(2, loaderCalls.get());
-        }
-    }
-
-    public void testFileMetadataCredentialIndependentKey() {
-        // Still shared across users, and derived rather than asserted: a storage identity names only the fields
-        // its configuration declares non-secret, so two principals differing in a credential report the SAME
-        // identity and share the entry. Handing both sides one literal would assert nothing.
-        String identityA = Configured.identityOf(Map.of("access_key", "userA", "endpoint", "e"), Set.of("endpoint"));
-        String identityB = Configured.identityOf(Map.of("access_key", "userB", "endpoint", "e"), Set.of("endpoint"));
-        assertEquals("a credential must not reach a storage identity", identityA, identityB);
-
-        FileMetadataCacheKey withCredA = new FileMetadataCacheKey("s3://bucket/data/file.parquet", identityA);
-        FileMetadataCacheKey withCredB = new FileMetadataCacheKey("s3://bucket/data/file.parquet", identityB);
-        assertEquals(withCredA, withCredB);
-    }
-
-    public void testClearAllEmptiesFileMetadataCache() throws Exception {
-        try (ExternalSourceCacheService service = new ExternalSourceCacheService(defaultSettings())) {
-            FileMetadataCacheKey key = new FileMetadataCacheKey("s3://bucket/data/file.parquet", "");
-            service.getOrComputeFileMetadata(key, k -> new FileMetadata(1L, 1L));
-            assertEquals(1, service.usageStats().get("file_metadata_cache.count"));
-
-            service.clearAll();
-            assertEquals(0, service.usageStats().get("file_metadata_cache.count"));
-        }
-    }
-
-    public void testUsageStatsExposesFileMetadataCacheKeys() throws Exception {
-        try (ExternalSourceCacheService service = new ExternalSourceCacheService(defaultSettings())) {
-            Map<String, Object> stats = service.usageStats();
-            assertTrue(stats.containsKey("file_metadata_cache.count"));
-            assertTrue(stats.containsKey("file_metadata_cache.hits"));
-            assertTrue(stats.containsKey("file_metadata_cache.misses"));
-            assertTrue(stats.containsKey("file_metadata_cache.evictions"));
-            assertEquals(0, stats.get("file_metadata_cache.count"));
-            assertEquals(0L, stats.get("file_metadata_cache.hits"));
-            assertEquals(0L, stats.get("file_metadata_cache.misses"));
-            assertEquals(0L, stats.get("file_metadata_cache.evictions"));
         }
     }
 

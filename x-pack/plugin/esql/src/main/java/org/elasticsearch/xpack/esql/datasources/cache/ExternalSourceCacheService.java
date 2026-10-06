@@ -73,7 +73,6 @@ public class ExternalSourceCacheService implements Closeable {
      * fingerprint is a correct-or-miss identity key; only weight/LRU reclaims it.
      */
     private final Cache<SchemaCacheKey, SchemaCacheEntry> datasetAggregateCache;
-    private final Cache<FileMetadataCacheKey, FileMetadata> fileMetadataCache;
     private final Cache<ListingCacheKey, FileList> listingCache;
     private final long maxTotalBytes;
     /** Byte budget for {@link #schemaCache} (one fifth of {@link #maxTotalBytes}). */
@@ -146,7 +145,6 @@ public class ExternalSourceCacheService implements Closeable {
      * public setting is a permanent support surface — it can be promoted to a setting later if a real need
      * appears.
      */
-    private static final int FILE_METADATA_CACHE_MAX_ENTRIES = 100_000;
     private final LinkedHashMap<SchemaCacheKey, PendingDatasetAggregate> pendingDatasetAggregates = new LinkedHashMap<>();
 
     /**
@@ -218,15 +216,6 @@ public class ExternalSourceCacheService implements Closeable {
             .weigher((key, value) -> value.estimatedBytes())
             .build();
 
-        // Freshness-discovery, like listing: this holds a file's CURRENT {length, mtime} (the version token
-        // that rebuilds the identity keys), so it must refresh on a clock — it shares the listing TTL. No
-        // byte weigher: entries are tiny and fixed-size, so it is bounded by a generous entry count instead
-        // of the byte budget.
-        this.fileMetadataCache = CacheBuilder.<FileMetadataCacheKey, FileMetadata>builder()
-            .setMaximumWeight(FILE_METADATA_CACHE_MAX_ENTRIES)
-            .setExpireAfterWrite(listingTtl)
-            .build();
-
         this.listingCache = CacheBuilder.<ListingCacheKey, FileList>builder()
             .setMaximumWeight(listingBudget)
             .setExpireAfterWrite(listingTtl)
@@ -235,14 +224,13 @@ public class ExternalSourceCacheService implements Closeable {
 
         logger.info(
             "External source cache initialized: total=[{}], schema=[{}], schemaMaxEntry=[{}], datasetAggregate=[{}], "
-                + "datasetAggregateMaxEntry=[{}], listing=[{}], fileMetadataMaxEntries=[{}], listingTTL=[{}]",
+                + "datasetAggregateMaxEntry=[{}], listing=[{}], listingTTL=[{}]",
             totalBudget,
             ByteSizeValue.ofBytes(schemaBudget),
             ByteSizeValue.ofBytes(schemaMaxEntryBytes),
             ByteSizeValue.ofBytes(datasetAggregateBudget),
             ByteSizeValue.ofBytes(datasetAggregateMaxEntryBytes),
             ByteSizeValue.ofBytes(listingBudget),
-            FILE_METADATA_CACHE_MAX_ENTRIES,
             listingTtl
         );
     }
@@ -313,21 +301,6 @@ public class ExternalSourceCacheService implements Closeable {
             }
             throw e;
         }
-    }
-
-    /**
-     * Returns cached {@link FileMetadata} or computes it via the loader. The loader — a single object
-     * probe (mtime + length), on S3 one {@code bytes=-1} GET — is only invoked on a miss. When the cache
-     * is disabled, the loader is called directly (bypassing the cache), so the probe still happens every
-     * query. Mirrors {@link #getOrComputeSchema}: this is the amortization lever that removes the
-     * per-query warm-path metadata probe for single-file sources.
-     */
-    public FileMetadata getOrComputeFileMetadata(FileMetadataCacheKey key, CacheLoader<FileMetadataCacheKey, FileMetadata> loader)
-        throws Exception {
-        if (enabled == false) {
-            return loader.load(key);
-        }
-        return fileMetadataCache.computeIfAbsent(key, loader);
     }
 
     /**
@@ -1689,7 +1662,6 @@ public class ExternalSourceCacheService implements Closeable {
     public void clearAll() {
         schemaCache.invalidateAll();
         datasetAggregateCache.invalidateAll();
-        fileMetadataCache.invalidateAll();
         listingCache.invalidateAll();
         synchronized (pendingDatasetAggregates) {
             pendingDatasetAggregates.clear();
@@ -1708,11 +1680,6 @@ public class ExternalSourceCacheService implements Closeable {
         stats.put("schema_cache.hits", schemaCache.stats().getHits());
         stats.put("schema_cache.misses", schemaCache.stats().getMisses());
         stats.put("schema_cache.evictions", schemaCache.stats().getEvictions());
-
-        stats.put("file_metadata_cache.count", fileMetadataCache.count());
-        stats.put("file_metadata_cache.hits", fileMetadataCache.stats().getHits());
-        stats.put("file_metadata_cache.misses", fileMetadataCache.stats().getMisses());
-        stats.put("file_metadata_cache.evictions", fileMetadataCache.stats().getEvictions());
 
         stats.put("listing_cache.count", listingCache.count());
         stats.put("listing_cache.hits", listingCache.stats().getHits());
@@ -1744,11 +1711,6 @@ public class ExternalSourceCacheService implements Closeable {
     // Visible for testing
     Cache<SchemaCacheKey, SchemaCacheEntry> datasetAggregateCache() {
         return datasetAggregateCache;
-    }
-
-    // Visible for testing
-    Cache<FileMetadataCacheKey, FileMetadata> fileMetadataCache() {
-        return fileMetadataCache;
     }
 
     // Visible for testing
