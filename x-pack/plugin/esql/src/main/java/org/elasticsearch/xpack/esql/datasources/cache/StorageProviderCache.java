@@ -383,6 +383,7 @@ public class StorageProviderCache implements Closeable {
             return delegate.exists(path);
         }
 
+
         @Override
         public List<String> supportedSchemes() {
             return delegate.supportedSchemes();

@@ -6056,6 +6056,45 @@ public class ExternalSourceResolverTests extends ESTestCase {
         }
     }
 
+    /**
+     * The case no cache key can represent: the credential is unchanged, every component of the schema key is
+     * unchanged, and the policy behind the credential has been edited so the object is no longer readable.
+     * Nothing on this side moves, so only asking storage can detect it — and a warm resolve asks nothing.
+     * Until the resolve path validates a cached entry against storage, the second resolve is served the schema
+     * and statistics of an object the caller can no longer fetch.
+     */
+    public void testWarmResolveServesEntryAfterReadAccessRevoked() throws Exception {
+        List<Attribute> schema = List.of(attr("id", DataType.INTEGER), attr("name", DataType.KEYWORD));
+        Map<String, List<Attribute>> schemasByPath = new HashMap<>();
+        schemasByPath.put("s3://bucket/data/single.parquet", schema);
+
+        RevocableStorageProvider provider = new RevocableStorageProvider(schemasByPath);
+
+        Settings settings = Settings.builder()
+            .put("esql.external.cache.size", "10mb")
+            .put("esql.external.cache.enabled", true)
+            .put("esql.external.cache.listing.ttl", "30s")
+            .build();
+
+        try (ExternalSourceCacheService cacheService = new ExternalSourceCacheService(settings)) {
+            ExternalSourceResolver resolver = createResolverWithCache(provider, schemasByPath, cacheService);
+
+            PlainActionFuture<ExternalSourceResolution> cold = new PlainActionFuture<>();
+            resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), cold);
+            assertNotNull(cold.actionGet().resolvedSource("s3://bucket/data/single.parquet"));
+            assertEquals("cold resolve probes the object", 1, provider.metadataProbeCount.get());
+
+            // The bucket policy is edited so this credential can no longer read the object. The credential
+            // itself is untouched, so no component of any cache key moves.
+            provider.readRevoked.set(true);
+
+            PlainActionFuture<ExternalSourceResolution> warm = new PlainActionFuture<>();
+            resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), warm);
+            ExternalClientException denied = expectThrows(ExternalClientException.class, warm::actionGet);
+            assertEquals(Condition.ACCESS_DENIED, denied.condition());
+        }
+    }
+
     public void testSingleFileCacheDisabledBypassesCache() throws Exception {
         List<Attribute> schema = List.of(attr("val", DataType.LONG));
         Map<String, List<Attribute>> schemasByPath = new HashMap<>();
@@ -8715,6 +8754,79 @@ public class ExternalSourceResolverTests extends ESTestCase {
         @Override
         public void close() {
             delegate.close();
+        }
+    }
+
+    /**
+     * StorageProvider whose metadata probe can be denied part-way through a test, modelling a storage-side
+     * policy change behind an unchanged credential: object construction still succeeds, and the probe that
+     * would have proved read access fails with {@link Condition#ACCESS_DENIED}.
+     */
+    private static class RevocableStorageProvider implements StorageProvider {
+        final AtomicBoolean readRevoked = new AtomicBoolean();
+        final AtomicInteger metadataProbeCount = new AtomicInteger();
+        private final StubStorageProvider delegate;
+
+        RevocableStorageProvider(Map<String, List<Attribute>> schemasByPath) {
+            this.delegate = new StubStorageProvider(Map.of(), schemasByPath, metadataProbeCount);
+        }
+
+        @Override
+        public StorageObject newObject(StoragePath path) {
+            return new RevocableStorageObject(path, 0, metadataProbeCount, readRevoked);
+        }
+
+        @Override
+        public StorageObject newObject(StoragePath path, long length) {
+            return new RevocableStorageObject(path, length, metadataProbeCount, readRevoked);
+        }
+
+        @Override
+        public StorageObject newObject(StoragePath path, long length, Instant lastModified) {
+            return new RevocableStorageObject(path, length, metadataProbeCount, readRevoked);
+        }
+
+        @Override
+        public StorageIterator listObjects(StoragePath prefix, boolean recursive) {
+            return delegate.listObjects(prefix, recursive);
+        }
+
+        @Override
+        public StorageChildren listChildren(StoragePath prefix, int limit) {
+            return null; // directory-aware listing is irrelevant to this test double
+        }
+
+        @Override
+        public boolean exists(StoragePath path) {
+            return delegate.exists(path);
+        }
+
+        @Override
+        public List<String> supportedSchemes() {
+            return delegate.supportedSchemes();
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
+        }
+    }
+
+    /** The object half of {@link RevocableStorageProvider}. */
+    private static class RevocableStorageObject extends StubStorageObject {
+        private final AtomicBoolean readRevoked;
+
+        RevocableStorageObject(StoragePath path, long length, AtomicInteger probeCount, AtomicBoolean readRevoked) {
+            super(path, length, probeCount);
+            this.readRevoked = readRevoked;
+        }
+
+        @Override
+        public Instant lastModified() {
+            if (readRevoked.get()) {
+                throw new ExternalClientException(Condition.ACCESS_DENIED, path(), "", "");
+            }
+            return super.lastModified();
         }
     }
 

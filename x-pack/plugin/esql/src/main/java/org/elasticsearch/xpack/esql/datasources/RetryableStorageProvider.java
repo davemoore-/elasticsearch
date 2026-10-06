@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.esql.datasources;
 
+import org.elasticsearch.xpack.esql.datasources.spi.ReadOutcome;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageChildren;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageObject;
 import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
@@ -99,6 +100,11 @@ class RetryableStorageProvider implements StorageProvider {
     @Override
     public boolean exists(StoragePath path) throws IOException {
         return policyFor(path).execute(() -> delegate.exists(path), "exists", path);
+    }
+
+    @Override
+    public ReadOutcome probeRead(StoragePath path) throws IOException {
+        return policyFor(path).execute(() -> delegate.probeRead(path), "probeRead", path);
     }
 
     @Override
