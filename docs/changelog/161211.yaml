@@ -1,0 +1,4 @@
+area: ES|QL
+pr: 161211
+summary: Re-check read access before serving cached facts about external data
+type: bug

@@ -114,8 +114,10 @@ public final class ExternalSourceCacheSettings {
      * <p>
      * Only the glob read path *needs* it — a single-file read probes storage every query, while proving read on
      * each file of a large listing every query does not scale, so re-deriving is the only moment access is
-     * re-checked there. It nonetheless applies to every entry in these stores: a per-file key and a single-file
-     * key are indistinguishable here, both carrying a null file-set fingerprint, so the window cannot be scoped
+     * re-checked there. That holds because {@link #FOOTER_CACHE_TTL} expires on write: a re-derive past it must
+     * read the footer from the store again rather than from a cache the previous query refreshed. It nonetheless
+     * applies to every entry in these stores: a per-file key and a single-file key are indistinguishable here,
+     * both carrying a null file-set fingerprint, so the window cannot be scoped
      * to one rail from inside the cache. Single-file entries therefore also re-derive each period, which costs a
      * re-harvest it does not need. {@code 0} is unbounded.
      * <p>
@@ -258,7 +260,7 @@ public final class ExternalSourceCacheSettings {
     );
 
     /**
-     * Expire-after-access TTL shared by both footer caches. If the bytes are stale, the parse
+     * Expire-after-write TTL shared by both footer caches. If the bytes are stale, the parse
      * derived from them is stale too. Must bridge the gaps between resolution, split discovery,
      * and execution of one query over a large file set, plus dashboard refresh intervals. The
      * trade-off: footer cache keys are {@code (path, fileLength)} without mtime (adding it would
