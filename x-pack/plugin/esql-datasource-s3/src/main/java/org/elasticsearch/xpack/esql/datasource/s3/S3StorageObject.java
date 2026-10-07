@@ -699,10 +699,10 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
      */
     private void probeObject() throws IOException {
         try {
-            // First byte, not the last: bytes=0-0 carries the same Content-Range total, and a suffix range is
-            // the more expensive of the two to serve. Either way this avoids a separate HEAD for size discovery,
-            // and it is also the request that establishes the caller may read the object at all — a range GET
-            // needs s3:GetObject, where a listing needs only s3:ListBucket.
+            // First byte, not the last: bytes=0-0 carries the same Content-Range total and a suffix range is the
+            // more expensive of the two to serve. This is the READ path's size discovery, where folding it into a
+            // GET is what lets exists() and length() on one object cost a single request. It is NOT the read-access
+            // probe — that is S3StorageProvider#probeRead, a HeadObject, which transfers nothing.
             GetObjectRequest.Builder request = GetObjectRequest.builder().bucket(bucket).key(key).range("bytes=0-0");
             try (var response = getObject(request)) {
                 // Drain the 1-byte body so the HTTP connection returns to the pool
