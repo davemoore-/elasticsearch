@@ -609,7 +609,7 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
     @Override
     public long length() throws IOException {
         if (cachedLength == null) {
-            fetchMetadata();
+            probeObject();
         }
         if (cachedExists != null && cachedExists == false) {
             throw new ExternalClientException(ExternalClientException.Condition.OBJECT_NOT_FOUND, path, "", "");
@@ -620,7 +620,7 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
     @Override
     public Instant lastModified() throws IOException {
         if (cachedLastModified == null) {
-            fetchMetadata();
+            probeObject();
         }
         return cachedLastModified;
     }
@@ -628,7 +628,7 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
     @Override
     public boolean exists() throws IOException {
         if (cachedExists == null) {
-            fetchMetadata();
+            probeObject();
         }
         return cachedExists;
     }
@@ -656,7 +656,14 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
         return path;
     }
 
-    private void fetchMetadata() throws IOException {
+    /**
+     * The smallest read of the object that S3 will authorize, and the length and last-modified observed while
+     * making it. Not a metadata request: there is no such thing here. {@code HeadObject} needs the same
+     * {@code s3:GetObject} as a range GET, so every way of learning an object's size is a read — which is why
+     * this doubles as the point where a caller's permission to read is established. A listing would be cheaper
+     * and would prove something else ({@code s3:ListBucket}), which is the distinction the caller depends on.
+     */
+    private void probeObject() throws IOException {
         try {
             // First byte, not the last: bytes=0-0 carries the same Content-Range total, and a suffix range is
             // the more expensive of the two to serve. Either way this avoids a separate HEAD for size discovery,
@@ -676,7 +683,7 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
                 }
             }
             // Content-Range missing (unexpected for S3) — fall back to HEAD for length
-            fetchMetadataViaHead();
+            probeObjectViaHead();
         } catch (NoSuchKeyException e) {
             ExternalPlanningIo.addMetadataGet(0);
             setNotFound();
@@ -686,16 +693,22 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
                 throw expired;
             }
             if (e.statusCode() == 416) {
-                // 416 Range Not Satisfiable: object exists but is empty (0 bytes)
+                // 416 Range Not Satisfiable: the object exists and is empty (0 bytes). A 416 is itself an
+                // authorized answer — producing it required s3:GetObject — so this counts as a successful probe.
                 cachedExists = true;
                 cachedLength = 0L;
+                // Stamp the timestamp too, or lastModified() finds it unset and runs this whole fetch a second
+                // time for an answer the error response does not carry. EPOCH is honest for an empty object: the
+                // timestamp is only ever used as a version token for derived content, and there is no content to
+                // version. An object later given content leaves this branch entirely and gets its real mtime.
+                cachedLastModified = Instant.EPOCH;
             } else if (e.statusCode() == 403) {
                 // Denied, and there is nothing cheaper left to try: the fallback range GET is now the same
                 // request, and a HEAD needs the same s3:GetObject so would be refused too. Surface it rather
                 // than spending a second request to be told the same thing.
                 throw throwReadFailure("Failed to read object metadata for", e);
             } else {
-                fetchMetadataViaHead();
+                probeObjectViaHead();
             }
         } catch (Exception e) {
             ExternalPlanningIo.addMetadataGet(0);
@@ -703,7 +716,7 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
         }
     }
 
-    private void fetchMetadataViaHead() throws IOException {
+    private void probeObjectViaHead() throws IOException {
         try {
             HeadObjectRequest request = HeadObjectRequest.builder().bucket(bucket).key(key).build();
             HeadObjectResponse response = s3Client.headObject(request);
@@ -725,14 +738,14 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
                 throw expired;
             }
             if (e instanceof S3Exception s3e && s3e.statusCode() == 403) {
-                fetchMetadataViaRangeGet();
+                probeObjectViaRangeGet();
             } else {
                 throw throwReadFailure("HeadObject request failed for", e);
             }
         }
     }
 
-    private void fetchMetadataViaRangeGet() throws IOException {
+    private void probeObjectViaRangeGet() throws IOException {
         try {
             GetObjectRequest.Builder request = GetObjectRequest.builder().bucket(bucket).key(key).range("bytes=0-0");
             try (var response = getObject(request)) {

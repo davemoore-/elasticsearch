@@ -211,7 +211,7 @@ public class S3RequestCountingTests extends ESTestCase {
     }
 
     /**
-     * When the suffix-range GET fails with a non-403 error, fetchMetadata falls back to HEAD.
+     * When the suffix-range GET fails with a non-403 error, probeObject falls back to HEAD.
      */
     public void testSuffixRangeFailureFallsBackToHead() throws IOException {
         when(mockS3.getObject(any(GetObjectRequest.class))).thenThrow(
@@ -239,31 +239,27 @@ public class S3RequestCountingTests extends ESTestCase {
     }
 
     /**
-     * When suffix-range GET returns 403, falls back to bytes=0-0 range GET (not HEAD,
-     * since s3:GetObject covers both GET-range and HEAD — HEAD would also be denied).
+     * A 403 is answered in one request, not two. The probe is already the cheapest read S3 will authorize, so
+     * there is nothing left to fall back to: the old bytes=0-0 retry is now the same request, and a HEAD needs
+     * the same s3:GetObject and would be refused identically. Spending a second request to be told the same
+     * thing is pure cost on a path that now runs on every resolve.
      */
-    public void testSuffixRange403FallsBackToRangeGet() throws IOException {
-        // First call (suffix range) → 403; second call (bytes=0-0) → succeeds with Content-Range
-        GetObjectResponse rangeResp = GetObjectResponse.builder()
-            .contentRange("bytes 0-0/" + FILE_SIZE)
-            .contentLength(1L)
-            .lastModified(LAST_MODIFIED)
-            .build();
+    public void testDenialCostsOneRequestAndNoHead() {
         when(mockS3.getObject(any(GetObjectRequest.class))).thenThrow(
             S3Exception.builder().statusCode(403).message("Access Denied").build()
-        ).thenReturn(new ResponseInputStream<>(rangeResp, AbortableInputStream.create(new ByteArrayInputStream(new byte[] { 0 }))));
+        );
 
         S3StorageObject obj = new S3StorageObject(mockS3, BUCKET, KEY, PATH);
-        long length = obj.length();
+        expectThrows(Exception.class, obj::length);
 
-        assertEquals(FILE_SIZE, length);
-        verify(mockS3, times(2)).getObject(any(GetObjectRequest.class));
+        verify(mockS3, times(1)).getObject(any(GetObjectRequest.class));
         verify(mockS3, never()).headObject(any(HeadObjectRequest.class));
     }
 
     /**
-     * When suffix-range GET returns 416 (Range Not Satisfiable), the object is empty (0 bytes).
-     * No second request needed — 416 confirms existence with zero length.
+     * A 416 means the object exists and is empty. One request covers it: the 416 is itself an authorized
+     * answer, and the probe stamps the timestamp as well as the length, so a following lastModified() does not
+     * find it unset and run the whole probe again.
      */
     public void testSuffixRange416MeansEmptyObject() throws IOException {
         when(mockS3.getObject(any(GetObjectRequest.class))).thenThrow(
@@ -273,6 +269,9 @@ public class S3RequestCountingTests extends ESTestCase {
         S3StorageObject obj = new S3StorageObject(mockS3, BUCKET, KEY, PATH);
         assertTrue(obj.exists());
         assertEquals(0L, obj.length());
+        // Asking for the timestamp too is the point: before it was stamped here, this call found it unset and
+        // re-ran the whole probe, so an empty object cost two requests on every resolve.
+        assertEquals(Instant.EPOCH, obj.lastModified());
         verify(mockS3, times(1)).getObject(any(GetObjectRequest.class));
         verify(mockS3, never()).headObject(any(HeadObjectRequest.class));
     }
