@@ -447,6 +447,7 @@ public class ExternalSourceCacheService implements Closeable {
             Map.of(SourceStatisticsSerializer.STATS_ROW_COUNT, rowCount),
             Map.of(),
             derivedAtMillis,
+            List.of(),
             List.of()
         );
         if (entry.estimatedBytes() > datasetAggregateMaxEntryBytes) {
