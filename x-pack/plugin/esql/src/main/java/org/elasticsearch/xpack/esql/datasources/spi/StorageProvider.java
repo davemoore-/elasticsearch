@@ -61,8 +61,9 @@ public interface StorageProvider extends Closeable {
      * last-modified are. The answer must come from storage on this call, never from cached state: callers use it
      * to decide whether facts already derived from the object may be served.
      *
-     * <p>Not {@link #exists}, which answers {@code boolean} — a refusal and a missing object arrive identically
-     * there, and reading that as "no object" turns a permission failure into an empty result.
+     * <p>Not {@link #exists}, which returns neither the length nor the last-modified this answer carries. It does
+     * distinguish a refusal from a missing object — it throws on the first and returns {@code false} only on a
+     * genuine 404 — but a caller that needs the object's version token would have to ask twice.
      *
      * <p>Defaulted rather than abstract because there is one correct generic answer, probe by stat; the default
      * asks storage and reports what it said. Override only to wrap the call.

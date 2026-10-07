@@ -13,9 +13,10 @@ import java.time.Instant;
  * What storage says when asked whether an object can be read now, from
  * {@link StorageProvider#probeRead(StoragePath)}.
  *
- * <p>Three outcomes rather than a boolean: {@code Absent} means there is nothing to serve, {@code Denied}
- * means there is and this caller may not have it, and those have different consequences. {@code Readable}
- * carries what the probe observed, so a caller can also tell whether the object still matches a cached entry.
+ * <p>Three outcomes rather than a thrown failure, so a caller can branch without catching: {@code Absent}
+ * means there is nothing to serve, {@code Denied} means there is and this caller may not have it, and those
+ * have different consequences. {@code Readable} carries what the probe observed, so a caller can also tell
+ * whether the object still matches a cached entry.
  *
  * <p>Classification is best-effort per provider. S3 maps its refusal; others propagate the failure, which
  * fails closed either way.
