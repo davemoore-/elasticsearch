@@ -218,6 +218,37 @@ public class FooterByteCacheTests extends ESTestCase {
         assertNull("an entry read continuously still expires one TTL after it was stored", shortLived.get(key));
     }
 
+    /**
+     * Storing bytes under a key that already holds an entry leaves that entry's expiry where it is. A reparse
+     * of bytes this cache just served goes through this path, so re-stamping there would postpone the window
+     * with no storage request behind it.
+     *
+     * <p>The store lands half a TTL in, while the entry is live, and the entry is read 1.2 TTL after it was
+     * first written. A store that restarted the clock would leave it readable there.
+     */
+    public void testPutIfAbsentDoesNotRestartAnExistingEntrysExpiry() {
+        TimeValue ttl = TimeValue.timeValueSeconds(1);
+        FooterByteCache shortLived = new FooterByteCache(1024 * 1024, 512 * 1024, ttl);
+        FooterByteCache.Key key = new FooterByteCache.Key(AbstractTestStorageObject.NOOP, "file.parquet", 1000);
+        byte[] data = randomByteArrayOfLength(64);
+
+        shortLived.put(key, data);
+        safeSleep(500);
+        shortLived.putIfAbsent(key, data);
+        safeSleep(700);
+
+        assertNull("re-storing bytes under a live entry does not extend it", shortLived.get(key));
+    }
+
+    public void testPutIfAbsentStoresWhenTheKeyIsEmpty() {
+        FooterByteCache.Key key = new FooterByteCache.Key(AbstractTestStorageObject.NOOP, "fresh.parquet", 1000);
+        byte[] data = randomByteArrayOfLength(64);
+
+        cache.putIfAbsent(key, data);
+
+        assertArrayEquals(data, cache.get(key));
+    }
+
     public void testFromSettingsUsesConfiguredTtl() {
         Settings settings = Settings.builder().put("esql.external.cache.footer.ttl", "42s").build();
         FooterByteCache configured = FooterByteCache.fromSettings(settings);

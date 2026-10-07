@@ -197,6 +197,22 @@ public class FooterByteCache {
         }
     }
 
+    /**
+     * Stores footer bytes and leaves an entry already under the key where it is, write time included. For a
+     * caller whose bytes may have come from this cache: storing them again would restart the entry's expiry
+     * with no storage request behind it, and expiring on the write is a bound only while every entry's clock
+     * starts at a read the store authorized. Skips an oversized entry as {@link #put} does.
+     *
+     * <p>Two callers racing an absent key both store, which costs a redundant write of equal bytes; a check
+     * atomic with the write would need a loader that cannot fail, and the entry either way holds the bytes
+     * one of them read.
+     */
+    public void putIfAbsent(Key key, byte[] bytes) {
+        if (bytes.length > 0 && bytes.length <= maxEntryBytes && cache.get(key) == null) {
+            cache.put(key, bytes);
+        }
+    }
+
     /** Removes all entries. Intended for test isolation. */
     public void invalidateAll() {
         cache.invalidateAll();

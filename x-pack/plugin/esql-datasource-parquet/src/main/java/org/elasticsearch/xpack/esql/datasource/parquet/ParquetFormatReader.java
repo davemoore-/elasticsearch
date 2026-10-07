@@ -1335,7 +1335,9 @@ public class ParquetFormatReader implements RangeAwareFormatReader, NoConfigForm
             executor.execute(() -> {
                 try {
                     ParquetMetadata footer = parseParsedFooterFromTail(object, length, tailBytes);
-                    footerBytes.put(cacheKey, tailBytes);
+                    // These bytes reach here from a cache hit as well as from a tail GET, so storing them
+                    // must not restart an existing entry's expiry.
+                    footerBytes.putIfAbsent(cacheKey, tailBytes);
                     released.onResponse(footer);
                 } catch (Exception e) {
                     released.onFailure(e);
