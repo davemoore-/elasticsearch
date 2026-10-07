@@ -61,6 +61,7 @@ public class SchemaCacheEntryTests extends ESTestCase {
                 Map.of(),
                 Map.of(),
                 0L,
+                List.of(),
                 List.of()
             )
         );

@@ -857,27 +857,18 @@ public class ExternalSourceCacheService implements Closeable {
     }
 
     /**
-     * Snapshots, per contribution path, every schema-cache entry whose canonical path matches — taken
-     * BEFORE a reconcile's first commit write. Under weight pressure (a many-file glob whose entries do not
-     * all fit the schema budget), the first admitted {@code putSchemaIfWithinCeiling} prunes the LRU tail,
-     * so file #1's
-     * commit can evict files #2..N's entries before their deltas apply — the deltas then match nothing, the
-     * all-or-nothing multi-file fold goes incomplete, and the warm aggregate re-scans the whole source.
-     * <p>
-     * Only ever consulted (via {@link #collectMatchingEntries}'s {@code fallback}) to recover a SIBLING's
-     * swept entry, so it is worth building only for a multi-path reconcile. A single-path reconcile has no
-     * sibling to evict, and its lone path's live sweep runs before any {@code put()} — seeing the same
-     * pre-write state the snapshot would — so it never consults the snapshot; we skip the sweep entirely
-     * there (the common single-file reconcile, where a second full-cache forEach would just double the
-     * hot-path scan cost). Freshness (mtime) and config-fingerprint discrimination are NOT applied here —
-     * {@link #collectMatchingEntries} re-checks both, exactly as it does for live matches.
-     */
-    /**
-     * The earliest {@code cachedAtMillis} among per-file entries on the given paths, or now when there are none.
+     * When the facts this aggregate folds were established, as the oldest contributing per-file entry reports it, or
+     * now when none of them is cached — the aggregate exists to outlive its per-file entries under LRU pressure, and
+     * with none of them present the contributions it folds came from the scan that just ran.
      *
-     * <p>One path-filtered {@code forEach}, the same enumeration {@link #snapshotEntriesByPath} uses and for the
-     * same reason: a path alone does not reconstruct a multi-component key. Only reached when a dataset
-     * aggregate is first written, never on a warm resolve.
+     * <p>Matching on the path alone is deliberate: the schema cache also keys on mtime and identity, so one path can
+     * hold several entries and this match takes all of them. A minimum over a superset is no larger than a minimum
+     * over the set, so over-matching can only date the aggregate earlier and expire it sooner. Narrowing the match
+     * would risk missing a real contributor, which moves the date the other way.
+     *
+     * <p>A fold assembled across queries whose earlier files have since been evicted is dated by its surviving
+     * entries alone, so its window can run from later than the earliest fact in it. Closing that needs the
+     * contributions' own timestamps, which this enumeration does not carry.
      */
     private long oldestContribution(Set<String> paths) {
         long now = System.currentTimeMillis();
@@ -894,8 +885,20 @@ public class ExternalSourceCacheService implements Closeable {
     }
 
     /**
-     * Pre-write snapshot of the contribution paths' entries, so a sibling evicted by the first commit's put can
-     * still be recovered. See the body for why this is one whole-cache forEach rather than per-path gets.
+     * Snapshots, per contribution path, every schema-cache entry whose canonical path matches — taken
+     * BEFORE a reconcile's first commit write. Under weight pressure (a many-file glob whose entries do not
+     * all fit the schema budget), the first admitted {@code putSchemaIfWithinCeiling} prunes the LRU tail,
+     * so file #1's
+     * commit can evict files #2..N's entries before their deltas apply — the deltas then match nothing, the
+     * all-or-nothing multi-file fold goes incomplete, and the warm aggregate re-scans the whole source.
+     * <p>
+     * Only ever consulted (via {@link #collectMatchingEntries}'s {@code fallback}) to recover a SIBLING's
+     * swept entry, so it is worth building only for a multi-path reconcile. A single-path reconcile has no
+     * sibling to evict, and its lone path's live sweep runs before any {@code put()} — seeing the same
+     * pre-write state the snapshot would — so it never consults the snapshot; we skip the sweep entirely
+     * there (the common single-file reconcile, where a second full-cache forEach would just double the
+     * hot-path scan cost). Freshness (mtime) and config-fingerprint discrimination are NOT applied here —
+     * {@link #collectMatchingEntries} re-checks both, exactly as it does for live matches.
      */
     private Map<String, List<Map.Entry<SchemaCacheKey, SchemaCacheEntry>>> snapshotEntriesByPath(Set<String> paths) {
         if (paths.size() < 2) {

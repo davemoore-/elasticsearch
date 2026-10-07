@@ -74,7 +74,8 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
             entry.safeMetadata(),
             entry.connectorConfig(),
             System.currentTimeMillis() - millisAgo,
-            entry.warnings()
+            entry.warnings(),
+            entry.widenedColumns()
         );
     }
 
