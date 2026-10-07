@@ -57,27 +57,33 @@ public interface StorageProvider extends Closeable {
     boolean exists(StoragePath path) throws IOException;
 
     /**
-     * Asks storage whether this provider's credentials can read the object right now, and what its length and
-     * last-modified are. The answer must come from storage on this call and never from cached or local state:
-     * callers use it to decide whether facts already derived from the object may be served, so an answer
-     * recalled from memory would confirm nothing.
+     * Asks storage whether this provider's credentials can read the object now, and what its length and
+     * last-modified are. The answer must come from storage on this call, never from cached state: callers use it
+     * to decide whether facts already derived from the object may be served.
      *
-     * <p>One call answers two independent questions — whether the caller may read the object, and whether it is
-     * still the object a cached entry was derived from. They stay separate because the consequences differ: a
-     * refusal fails the query, a moved timestamp only means the derived facts must be recomputed.
+     * <p>Not {@link #exists}, which answers {@code boolean} — a refusal and a missing object arrive identically
+     * there, and reading that as "no object" turns a permission failure into an empty result.
      *
-     * <p>{@link #exists} is not a substitute. It answers {@code boolean}, so a refusal and a missing object
-     * arrive identically, and a caller reading that as "no object" turns a permission failure into an empty
-     * result.
-     *
-     * <p>Unlike {@link #listChildren}, this has a default, because here there is one correct generic answer
-     * rather than a choice between two legitimate ones: probe by stat. The default is safe in the direction
-     * that matters — it asks storage and reports what storage said, and no code path returns a readable answer
-     * without a metadata call having returned first. Override only to add behaviour around the probe, such as a
-     * retry policy or a concurrency permit.
+     * <p>Defaulted rather than abstract because there is one correct generic answer, probe by stat; the default
+     * asks storage and reports what it said. Override only to wrap the call.
      */
     default ReadOutcome probeRead(StoragePath path) throws IOException {
-        return ReadOutcome.byStat(this, path);
+        try {
+            StorageObject object = newObject(path);
+            long length = object.length();
+            Instant lastModified = object.lastModified();
+            return new ReadOutcome.Readable(length, lastModified == null ? Instant.EPOCH : lastModified);
+        } catch (ExternalException e) {
+            // Anything else — an outage, a throttle, a clock skew — is not an answer to the question asked, so it
+            // propagates. Reporting one as Denied would turn a transient fault into a permission failure.
+            if (e.condition() == ExternalException.Condition.OBJECT_NOT_FOUND) {
+                return new ReadOutcome.Absent(e);
+            }
+            if (e.condition() == ExternalException.Condition.ACCESS_DENIED) {
+                return new ReadOutcome.Denied(e);
+            }
+            throw e;
+        }
     }
 
     /** Returns the URI schemes this provider handles (e.g., ["http", "https"]). */

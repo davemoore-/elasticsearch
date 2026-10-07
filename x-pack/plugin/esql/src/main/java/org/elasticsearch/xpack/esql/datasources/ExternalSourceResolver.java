@@ -57,7 +57,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.FileList;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.HeapEstimates;
 import org.elasticsearch.xpack.esql.datasources.spi.ListingHint;
-import org.elasticsearch.xpack.esql.datasources.spi.ReadProof;
+import org.elasticsearch.xpack.esql.datasources.spi.ReadOutcome;
 import org.elasticsearch.xpack.esql.datasources.spi.SimpleSourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.SkipWarnings;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
@@ -1164,9 +1164,9 @@ public class ExternalSourceResolver {
             StorageEntry storageEntry;
             SourceStatistics harvestedStatistics = null;
             if (isCacheable(provider)) {
-                // Warm path is zero-I/O: the file-metadata cache holds {length, mtime} within the schema TTL, so a warm
-                // single-file resolve never touches a live object (fileMetadataOf). mtime is the cache key's version token;
-                // length + mtime rebuild the singleton FileList.
+                // One live object probe per resolve, warm or cold (fileMetadataOf): it is what establishes that this
+                // query's credentials can still read the object, which no cache key can represent. mtime is the cache
+                // key's version token; length + mtime rebuild the singleton FileList.
                 FileMetadata meta = fileMetadataOf(storagePath, provider);
                 String formatType = detectFormatType(storagePath, fileConfig);
                 SchemaCacheKey schemaKey = SchemaCacheKey.build(
@@ -1902,20 +1902,19 @@ public class ExternalSourceResolver {
      * The single file's {@link FileMetadata} ({@code {length, mtime}}), shared by both single-file rails (inferred
      * {@link #resolveSingleFileSource} and strict {@link #resolveStrictSingleFile}). The mtime is the version token
      * that rebuilds the {@link SchemaCacheKey}; length + mtime rebuild the singleton {@code StorageEntry}.
-     */
-    /**
-     * One probe per resolve, never served from a cache. The probe is the only point on this path that asks
-     * storage whether this query's credentials can read the object, so an answer recalled from an earlier
-     * query would prove nothing about this one: the credential's entitlement can be withdrawn without any
-     * component of any cache key moving, and nothing observable here changes when it is.
      * <p>
-     * It is also what makes the mtime below trustworthy as a version token rather than a remembered one, and
-     * it is cheap against what a miss costs — a one-byte suffix-range GET on S3, against a footer read and a
-     * statistics harvest, or a parse for a text format.
+     * Probed once per resolve, never cached: entitlement can be withdrawn at the store without any component of
+     * any cache key moving, so a remembered answer proves nothing about this query.
+     * <p>
+     * The caches take no proof and cannot check for one. What closes this rail is that their key cannot be built
+     * without the mtime returned here — a call site obtaining an mtime another way would bypass it.
      */
     private FileMetadata fileMetadataOf(StoragePath storagePath, StorageProvider provider) throws Exception {
-        ReadProof proof = ReadProof.probe(provider, storagePath);
-        return new FileMetadata(proof.length(), proof.lastModified().toEpochMilli());
+        return switch (provider.probeRead(storagePath)) {
+            case ReadOutcome.Readable readable -> new FileMetadata(readable.length(), readable.lastModified().toEpochMilli());
+            case ReadOutcome.Denied denied -> throw denied.failure();
+            case ReadOutcome.Absent absent -> throw absent.failure();
+        };
     }
 
     /**
@@ -4170,9 +4169,9 @@ public class ExternalSourceResolver {
         String sourceType
     ) throws Exception {
         // Same warm-probe amortization as the inferred single-file rail (resolveSingleFileSource): a cacheable
-        // provider serves {length, mtime} from the file-metadata cache within the schema TTL, so a warm strict
-        // resolve never probes the live object; a miss (or a non-cacheable provider) probes exactly once. Strict
-        // resolution reads no file body, so length + mtime are the only per-query object metadata it needs.
+        // One live object probe per resolve, warm or cold, as on the inferred rail. Strict resolution reads no file
+        // body, so length + mtime are the only per-query object metadata it needs — and the probe that supplies them
+        // is also what proves this query may read the object before its cached physical schema is consulted.
         FileMetadata meta = fileMetadataOf(storagePath, provider);
         // Declared mapping is the whole schema, in LOGICAL names; a `path` rename is applied at the reader, so the
         // operator (and file schema) work purely in logical names.

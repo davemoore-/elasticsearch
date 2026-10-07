@@ -6013,13 +6013,42 @@ public class ExternalSourceResolverTests extends ESTestCase {
     }
 
     /**
-     * The case no cache key can represent: the credential is unchanged, every component of the schema key is
-     * unchanged, and the policy behind the credential has been edited so the object is no longer readable.
-     * Nothing on this side moves, so only asking storage can detect it — and a warm resolve asks nothing.
-     * Until the resolve path validates a cached entry against storage, the second resolve is served the schema
-     * and statistics of an object the caller can no longer fetch.
+     * The strict rail reads a declared schema rather than inferring one, but it still consults the cached
+     * physical schema as a coercibility oracle — so it probes per resolve like the inferred rail.
      */
-    public void testWarmResolveServesEntryAfterReadAccessRevoked() throws Exception {
+    public void testStrictSingleFileResolveProbesEveryTime() throws Exception {
+        String file = "s3://bucket/data/strict.parquet";
+        Map<String, List<Attribute>> schemasByPath = Map.of(file, List.of(attr("n", DataType.LONG)));
+        CountingStorageProvider provider = new CountingStorageProvider(Map.of(), schemasByPath);
+
+        Map<String, DatasetFieldMapping> props = new LinkedHashMap<>();
+        props.put("n", new DatasetFieldMapping("long", null));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, props));
+
+        Settings settings = Settings.builder()
+            .put("esql.external.cache.size", "10mb")
+            .put("esql.external.cache.enabled", true)
+            .put("esql.external.cache.listing.ttl", "30s")
+            .build();
+
+        try (ExternalSourceCacheService cacheService = new ExternalSourceCacheService(settings)) {
+            ExternalSourceResolver resolver = createResolverWithCache(provider, schemasByPath, cacheService);
+
+            for (int i = 1; i <= 2; i++) {
+                PlainActionFuture<ExternalSourceResolution> f = new PlainActionFuture<>();
+                resolver.resolve(List.of(file), Map.of(file, new HashMap<>()), null, Map.of(file, mapping), null, f);
+                assertNotNull(f.actionGet().resolvedSource(file));
+                assertEquals("strict resolve " + i + " probes the object", i, provider.metadataProbeCount.get());
+            }
+        }
+    }
+
+    /**
+     * The case no cache key can represent: the credential is unchanged, every component of the schema key is
+     * unchanged, and the policy behind it has been edited so the object is no longer readable. Nothing on this
+     * side moves, so only asking storage detects it — which the resolve now does on every resolve.
+     */
+    public void testWarmResolveFailsAfterReadAccessRevoked() throws Exception {
         List<Attribute> schema = List.of(attr("id", DataType.INTEGER), attr("name", DataType.KEYWORD));
         Map<String, List<Attribute>> schemasByPath = new HashMap<>();
         schemasByPath.put("s3://bucket/data/single.parquet", schema);
@@ -8661,8 +8690,8 @@ public class ExternalSourceResolverTests extends ESTestCase {
         final AtomicInteger schemaCallCount = new AtomicInteger();
         // Counts the single-file metadata probe. Incremented by the object's lastModified() (the one caller
         // of it in the cacheable flow), so it isolates the metadata probe from the schema-resolution object
-        // creation that also calls newObject. The warm-path file-metadata cache drives it to exactly one
-        // probe across repeated resolves.
+        // creation that also calls newObject. Every resolve probes, so this counts one per resolve rather than
+        // one across repeated resolves.
         final AtomicInteger metadataProbeCount = new AtomicInteger();
         private final StubStorageProvider delegate;
 

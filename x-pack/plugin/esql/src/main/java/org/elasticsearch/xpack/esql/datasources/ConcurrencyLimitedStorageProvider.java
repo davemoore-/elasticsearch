@@ -7,7 +7,6 @@
 
 package org.elasticsearch.xpack.esql.datasources;
 
-import org.elasticsearch.xpack.esql.datasources.spi.ReadOutcome;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageChildren;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageObject;
 import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
@@ -76,16 +75,6 @@ class ConcurrencyLimitedStorageProvider implements StorageProvider {
         limiter.acquireChecked();
         try {
             return delegate.exists(path);
-        } finally {
-            limiter.release();
-        }
-    }
-
-    @Override
-    public ReadOutcome probeRead(StoragePath path) throws IOException {
-        limiter.acquireChecked();
-        try {
-            return delegate.probeRead(path);
         } finally {
             limiter.release();
         }

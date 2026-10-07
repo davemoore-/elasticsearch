@@ -17,8 +17,8 @@ import java.util.List;
 
 /**
  * Cluster settings for ESQL external source caching.
- * Everything here is restart-only (NodeScope) except the enabled flag, which is dynamic and wired to a
- * live consumer in {@code EsqlPlugin.createComponents}. A setting must not be declared Dynamic unless a
+ * Everything here is restart-only (NodeScope)  except the enabled flag and the schema TTL, both of
+ * which are dynamic and wired to live consumers in {@code EsqlPlugin.createComponents}. A setting must not be declared Dynamic unless a
  * {@code ClusterSettings.addSettingsUpdateConsumer} actually observes updates — a Dynamic flag without a
  * consumer accepts runtime updates and silently ignores them.
  */
@@ -74,7 +74,7 @@ public final class ExternalSourceCacheSettings {
      * an earlier version still starts (removing a released node setting would fail startup). It is wired to
      * nothing and emits a deprecation warning when set.
      */
-    public static final Setting<TimeValue> SCHEMA_TTL = Setting.positiveTimeSetting(
+    public static final Setting<TimeValue> SCHEMA_TTL_OLD = Setting.positiveTimeSetting(
         "esql.source.cache.schema.ttl",
         TimeValue.timeValueMinutes(5),
         Setting.Property.DeprecatedWarning,
@@ -93,11 +93,12 @@ public final class ExternalSourceCacheSettings {
     );
 
     // Only the listing cache carries a time-based refresh: it discovers file identity and has no per-file
-    // key to invalidate on. The schema and dataset-aggregate caches invalidate by identity; DERIVED_TTL bounds
+    // key to invalidate on. The schema and dataset-aggregate caches invalidate by identity; REVALIDATE_INTERVAL bounds
     // how long they may serve, which is a different question from whether their inputs moved.
     // Default is five minutes after write (the deprecated key's default; this key falls back to it). A file
     // added or removed becomes visible on the next query once that elapses. Lower the setting for faster
-    // visibility. File metadata (length, mtime) shares this TTL. Re-lists stay query-triggered.
+    // visibility. Re-lists stay query-triggered. File length and mtime are no longer cached at all — they come
+    // from the per-resolve probe — so they are not bounded by this or any other clock.
     public static final Setting<TimeValue> LISTING_TTL = Setting.positiveTimeSetting(
         "esql.external.cache.listing.ttl",
         LISTING_TTL_OLD,
@@ -106,39 +107,20 @@ public final class ExternalSourceCacheSettings {
     );
 
     /**
-     * Canonical stripe size for row-format external-source statistics, in file/decompressed-stream
-     * bytes. A stripe is a pure ADDRESSING grid over file content: the reader attributes each record to
-     * stripe {@code floor(recordStartOffset / B)} as it parses, and stats are captured, deduplicated,
-     * and cached per stripe (see {@code ExternalSourceCacheService}). It is orthogonal to partitioning
-     * — chunk dispatch, macro-splits, and parallelism are unaffected; the grid only determines which
-     * stripe a record's stats land in. The value participates in stripe identity, so it is restart-only
-     * and cluster-uniform: changing it simply makes previously cached stripe entries unmatchable (a
-     * clean invalidation, never a mixed grid).
+     * How long a schema or statistic inferred from a file may be served before it is derived again. Not a
+     * freshness bound — the identity keys already miss when a file moves — but a bound on entitlement being
+     * withdrawn at the store while every component of the key stays fixed.
      * <p>
-     * Default 8 MB, derived (not arbitrary) from the ClickBench text-format file-size distribution
-     * against the schema-cache budget: a representative ~1.8 GB shard yields ~231 stripes (ample
-     * pruning resolution), and a 500-hot-file working set consumes ~11 MB — 42% of the ~26 MB schema
-     * budget on a 32 GB heap. Smaller grids (≤1 MB) overflow the budget on realistic working sets;
-     * larger grids (≥32 MB) coarsen a representative shard to &lt;60 stripes, blunting per-stripe min/max
-     * pruning. 8 MB is the knee.
+     * Only the glob read path needs it: a single-file read probes storage every query, while proving read on
+     * each file of a large listing every query does not scale, so re-deriving is the only moment access is
+     * re-checked there. {@code 0} is unbounded. A window costs one cold re-read per dataset per period.
+     * <p>
+     * Unlike {@link #LISTING_TTL}, this does not fall back to its deprecated {@code esql.source.cache.*}
+     * counterpart. That key shipped documented as ignored, so a deployment may carry a value for it that
+     * nobody expects to be live, and inheriting it here would quietly make it so.
      */
-    /**
-     * How long a derived fact — an inferred schema, a row count, a column extremum — may be served after the
-     * read that produced it. This is not a freshness bound: the identity keys already miss when the inputs move.
-     * It bounds something no key can see, which is the caller's entitlement being withdrawn at the store while
-     * every component of the key stays fixed.
-     * <p>
-     * The single-file rail does not need this — it probes storage on every resolve, so entitlement is
-     * established per query. The glob rail does, because proving read on each of a ten-thousand-file listing
-     * per query does not scale, so time is the only bound available to it.
-     * <p>
-     * Twenty minutes follows {@code CachingUsernamePasswordRealm}, whose cache bounds an entitlement owned
-     * outside Elasticsearch for the same reason. {@code 0} means unbounded, and costs one cold re-harvest per
-     * dataset per window when set — the entries it discards are still valid as facts, which is the price of
-     * bounding something the facts cannot tell you.
-     */
-    public static final Setting<TimeValue> DERIVED_TTL = Setting.timeSetting(
-        "esql.external.cache.derived.ttl",
+    public static final Setting<TimeValue> SCHEMA_TTL = Setting.timeSetting(
+        "esql.external.cache.schema.ttl",
         TimeValue.timeValueMinutes(20),
         TimeValue.timeValueMillis(0),
         Setting.Property.NodeScope,
@@ -289,7 +271,7 @@ public final class ExternalSourceCacheSettings {
             CACHE_ENABLED,
             CACHE_ENABLED_OLD,
             SCHEMA_TTL,
-            DERIVED_TTL,
+            SCHEMA_TTL_OLD,
             LISTING_TTL,
             LISTING_TTL_OLD,
             STRIPE_SIZE,

@@ -74,8 +74,8 @@ public class ExternalSourceCacheService implements Closeable {
      */
     private final Cache<SchemaCacheKey, SchemaCacheEntry> datasetAggregateCache;
     private final Cache<ListingCacheKey, FileList> listingCache;
-    /** Bound on how long a derived fact may be served; see {@link ExternalSourceCacheSettings#DERIVED_TTL}. */
-    private volatile long derivedTtlMillis;
+    /** How long an inferred schema or statistic may be served; see {@link ExternalSourceCacheSettings#SCHEMA_TTL}. */
+    private volatile long schemaTtlMillis;
     private final long maxTotalBytes;
     /** Byte budget for {@link #schemaCache} (one fifth of {@link #maxTotalBytes}). */
     private final long schemaBudget;
@@ -138,15 +138,6 @@ public class ExternalSourceCacheService implements Closeable {
     private static final int MAX_PENDING_DATASET_AGGREGATES = 64;
     private static final int MAX_PENDING_TOTAL_PATHS = 65_536;
 
-    /**
-     * Entry-count cap for the file-metadata cache. Unlike the schema and listing caches (byte-weighted,
-     * variable-size values), a {@link FileMetadata} is two {@code long}s behind a small path key, so the
-     * cache is bounded by count rather than bytes — no per-entry byte weigher. 100k tiny entries is a few
-     * tens of MB worst case, and, being TTL-bounded by the listing TTL, the live set is normally far
-     * smaller. Kept a constant rather than a cluster setting: no workload has needed to tune it, and a
-     * public setting is a permanent support surface — it can be promoted to a setting later if a real need
-     * appears.
-     */
     private final LinkedHashMap<SchemaCacheKey, PendingDatasetAggregate> pendingDatasetAggregates = new LinkedHashMap<>();
 
     /**
@@ -191,7 +182,7 @@ public class ExternalSourceCacheService implements Closeable {
         this.enabled = ExternalSourceCacheSettings.CACHE_ENABLED.get(settings);
 
         TimeValue listingTtl = ExternalSourceCacheSettings.LISTING_TTL.get(settings);
-        this.derivedTtlMillis = ExternalSourceCacheSettings.DERIVED_TTL.get(settings).millis();
+        this.schemaTtlMillis = ExternalSourceCacheSettings.SCHEMA_TTL.get(settings).millis();
 
         // Per-file schema stays at its established 20%; the dataset-aggregate cache gets a small dedicated
         // slice carved from listing (each dataset entry is a single row count — kilobytes suffice — so its
@@ -239,22 +230,20 @@ public class ExternalSourceCacheService implements Closeable {
     }
 
     /**
-     * Whether a derived-fact entry has outlived the window in which it may be served.
+     * Whether an entry has outlived the window in which it may be served.
      *
-     * <p>Checked where an entry is SERVED rather than enforced with {@code setExpireAfterWrite}: statistics
-     * enrichment re-puts the same key as a query harvests more of a dataset, and {@code Cache#put} stamps a
-     * fresh write time, so a write-expiry clock would be reset by the very reads whose entitlement this
-     * bounds. {@code cachedAtMillis} is set when the facts were derived and {@code withSafeMetadata} carries
-     * it across those re-puts, so it survives enrichment.
+     * <p>Checked on serve, not with {@code setExpireAfterWrite}: statistics enrichment re-puts the same key and
+     * {@code Cache#put} stamps a fresh write time, so a write clock would be reset by the very reads this
+     * bounds. {@code cachedAtMillis} survives those re-puts via {@code withSafeMetadata}.
      */
-    private boolean outsideDerivedWindow(SchemaCacheEntry entry) {
-        long ttl = derivedTtlMillis;
+    private boolean outsideSchemaTtl(SchemaCacheEntry entry) {
+        long ttl = schemaTtlMillis;
         return ttl > 0 && entry != null && (System.currentTimeMillis() - entry.cachedAtMillis()) > ttl;
     }
 
-    /** Applies {@link ExternalSourceCacheSettings#DERIVED_TTL} at runtime. */
-    public void setDerivedTtl(TimeValue ttl) {
-        this.derivedTtlMillis = ttl.millis();
+    /** Applies {@link ExternalSourceCacheSettings#SCHEMA_TTL} at runtime. */
+    public void setSchemaTtl(TimeValue ttl) {
+        this.schemaTtlMillis = ttl.millis();
     }
 
     /**
@@ -271,7 +260,7 @@ public class ExternalSourceCacheService implements Closeable {
             return loader.load(key);
         }
         SchemaCacheEntry cached = schemaCache.get(key);
-        if (cached != null && outsideDerivedWindow(cached) == false) {
+        if (cached != null && outsideSchemaTtl(cached) == false) {
             return cached;
         }
 
@@ -337,7 +326,7 @@ public class ExternalSourceCacheService implements Closeable {
             return null;
         }
         SchemaCacheEntry entry = schemaCache.get(key);
-        return outsideDerivedWindow(entry) ? null : entry;
+        return outsideSchemaTtl(entry) ? null : entry;
     }
 
     /**
@@ -394,7 +383,7 @@ public class ExternalSourceCacheService implements Closeable {
         if (entry == null || entry.safeMetadata().get(SourceStatisticsSerializer.STATS_ROW_COUNT) instanceof Number == false) {
             return null;
         }
-        if (outsideDerivedWindow(entry)) {
+        if (outsideSchemaTtl(entry)) {
             return null;
         }
         return entry.safeMetadata();

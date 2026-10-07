@@ -40,7 +40,7 @@ import static org.elasticsearch.xpack.esql.datasources.S3FixtureUtils.addBlobToF
 
 /**
  * Verifies that dataset queries targeting different S3 endpoints are not cross-contaminated
- * via the listing, schema, or file-metadata caches.
+ * via the listing or schema caches.
  *
  * <p>The bug: {@link org.elasticsearch.xpack.esql.datasources.ExternalSourceResolver} built
  * all three cache keys from the raw config map. For dataset queries, connection settings

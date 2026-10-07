@@ -7,23 +7,18 @@
 
 package org.elasticsearch.xpack.esql.datasources.spi;
 
-import java.io.IOException;
 import java.time.Instant;
 
 /**
- * What storage says when asked whether an object can be read right now, from
+ * What storage says when asked whether an object can be read now, from
  * {@link StorageProvider#probeRead(StoragePath)}.
  *
- * <p>The three outcomes are kept apart because they have different consequences and because collapsing
- * two of them loses the distinction a caller needs: {@code Absent} means there is nothing to serve, while
- * {@code Denied} means there is something and this caller may not have it. {@link StorageProvider#exists}
- * cannot carry that — it answers {@code boolean}, so a refusal and a missing object arrive identically, and
- * a caller reading the answer as "no object" turns a permission failure into an empty result.
+ * <p>Three outcomes rather than a boolean: {@code Absent} means there is nothing to serve, {@code Denied}
+ * means there is and this caller may not have it, and those have different consequences. {@code Readable}
+ * carries what the probe observed, so a caller can also tell whether the object still matches a cached entry.
  *
- * <p>{@code Readable} carries the length and last-modified the probe observed, so one call answers two
- * independent questions: whether the caller may read the object, and whether it is still the object a
- * cached entry was derived from. Those answers are deliberately not fused — a denial refuses the query,
- * while a moved timestamp only means the derived facts must be recomputed.
+ * <p>Classification is best-effort per provider. S3 maps its refusal; others propagate the failure, which
+ * fails closed either way.
  */
 public sealed interface ReadOutcome {
 
@@ -36,30 +31,4 @@ public sealed interface ReadOutcome {
     /** Storage refused: there may well be an object, and this caller may not read it. */
     record Denied(ExternalException failure) implements ReadOutcome {}
 
-    /**
-     * Probes by asking the provider for the object's metadata, which is what every blob provider's stat
-     * call already does. Shared so each {@link StorageProvider} states that it probes by stat without
-     * repeating the condition mapping, and so no provider is tempted to answer from local state: a
-     * {@code Readable} is only ever returned after the provider's own metadata call has returned.
-     *
-     * <p>Conditions other than a missing object or a refusal propagate. An outage, a throttle or a clock
-     * skew is not an answer to the question asked, and reporting one as {@code Denied} would turn a
-     * transient fault into a permission failure.
-     */
-    static ReadOutcome byStat(StorageProvider provider, StoragePath path) throws IOException {
-        try {
-            StorageObject object = provider.newObject(path);
-            long length = object.length();
-            Instant lastModified = object.lastModified();
-            return new Readable(length, lastModified == null ? Instant.EPOCH : lastModified);
-        } catch (ExternalException e) {
-            if (e.condition() == ExternalException.Condition.OBJECT_NOT_FOUND) {
-                return new Absent(e);
-            }
-            if (e.condition() == ExternalException.Condition.ACCESS_DENIED) {
-                return new Denied(e);
-            }
-            throw e;
-        }
-    }
 }

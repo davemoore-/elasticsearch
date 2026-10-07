@@ -62,11 +62,6 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
             .build();
     }
 
-    /**
-     * The listing cache expires on a clock, because a listing is freshness discovery: what a prefix holds
-     * changes without anything the key can see. (Its file-metadata counterpart was removed with that cache —
-     * length and mtime now come from the per-resolve probe, so there is no entry to age.)
-     */
     /** An entry copied with an older derivation time, to age it without sleeping. */
     private static SchemaCacheEntry agedBy(SchemaCacheEntry entry, long millisAgo) {
         return new SchemaCacheEntry(
@@ -88,11 +83,45 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
      * unaffordable — so the window in which its derived facts may be served is bounded by time instead. Past
      * the window the entry is not served, however valid the facts themselves still are.
      */
-    public void testDerivedFactsAreNotServedPastTheWindow() throws Exception {
+    /** The third gate: the dataset aggregate is the glob rail's warm answer, so the window covers it too. */
+    public void testDatasetAggregateIsNotServedPastTheTtl() throws Exception {
         Settings settings = Settings.builder()
             .put("esql.external.cache.size", "10mb")
             .put("esql.external.cache.enabled", true)
-            .put("esql.external.cache.derived.ttl", "20m")
+            .put("esql.external.cache.schema.ttl", "1ms")
+            .build();
+        try (ExternalSourceCacheService service = new ExternalSourceCacheService(settings)) {
+            SchemaCacheKey key = datasetKey();
+            service.putDatasetAggregate(key, 123L, "csv", "s3://bucket/data/*.csv");
+            assertBusy(() -> assertNull("past the window the aggregate is not served", service.getDatasetAggregate(key)));
+        }
+    }
+
+    /** Applying the setting at runtime must work, since it is declared Dynamic and is the glob rail's only lever. */
+    public void testSchemaTtlAppliesAtRuntime() throws Exception {
+        Settings settings = Settings.builder()
+            .put("esql.external.cache.size", "10mb")
+            .put("esql.external.cache.enabled", true)
+            .put("esql.external.cache.schema.ttl", "20m")
+            .build();
+        try (ExternalSourceCacheService service = new ExternalSourceCacheService(settings)) {
+            SchemaCacheKey key = SchemaCacheKey.build("s3://bucket/data/file.parquet", 1000L, ".parquet", "", Map.of());
+            service.putSchema(key, agedBy(testSchemaEntry(), TimeValue.timeValueMinutes(21).millis()));
+            assertNull("outside the configured window", service.getSchemaIfPresent(key));
+
+            service.setSchemaTtl(TimeValue.timeValueHours(24));
+            assertNotNull("a widened window applies without a restart", service.getSchemaIfPresent(key));
+
+            service.setSchemaTtl(TimeValue.timeValueMinutes(20));
+            assertNull("and a narrowed one applies too", service.getSchemaIfPresent(key));
+        }
+    }
+
+    public void testSchemaIsNotServedPastTheTtl() throws Exception {
+        Settings settings = Settings.builder()
+            .put("esql.external.cache.size", "10mb")
+            .put("esql.external.cache.enabled", true)
+            .put("esql.external.cache.schema.ttl", "20m")
             .build();
         try (ExternalSourceCacheService service = new ExternalSourceCacheService(settings)) {
             SchemaCacheKey key = SchemaCacheKey.build("s3://bucket/data/file.parquet", 1000L, ".parquet", "", Map.of());
@@ -117,11 +146,11 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
      * Zero means unbounded, matching the convention the listing TTL and the wider ecosystem use: an operator
      * who wants the old behaviour back sets it, and gets it, rather than guessing at a very large value.
      */
-    public void testDerivedWindowOfZeroIsUnbounded() throws Exception {
+    public void testSchemaTtlOfZeroIsUnbounded() throws Exception {
         Settings settings = Settings.builder()
             .put("esql.external.cache.size", "10mb")
             .put("esql.external.cache.enabled", true)
-            .put("esql.external.cache.derived.ttl", "0")
+            .put("esql.external.cache.schema.ttl", "0")
             .build();
         try (ExternalSourceCacheService service = new ExternalSourceCacheService(settings)) {
             SchemaCacheKey key = SchemaCacheKey.build("s3://bucket/data/file.parquet", 1000L, ".parquet", "", Map.of());
@@ -132,6 +161,11 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
         }
     }
 
+    /**
+     * The listing cache expires on a clock, because a listing is freshness discovery: what a prefix holds
+     * changes without anything the key can see. (Its file-metadata counterpart was removed with that cache —
+     * length and mtime now come from the per-resolve probe, so there is no entry to age.)
+     */
     public void testListingExpiresAfterWrite() throws Exception {
         Settings settings = Settings.builder()
             .put("esql.external.cache.size", "10mb")
