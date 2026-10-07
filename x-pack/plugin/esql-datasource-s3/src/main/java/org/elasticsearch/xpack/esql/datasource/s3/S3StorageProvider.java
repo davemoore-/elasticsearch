@@ -879,20 +879,16 @@ public class S3StorageProvider implements StorageProvider {
     }
 
     /**
-     * Establishes that these credentials may read the object, and reports its length and last-modified.
+     * Whether these credentials can read the object, with its length and last-modified.
      *
-     * <p>A {@code HeadObject}, which transfers no body. {@code HeadObject} is authorized as
-     * {@code s3:GetObject}, so a refusal here is a refusal to read — the distinction callers depend on, since a
-     * listing needs only {@code s3:ListBucket}. Nothing cheaper exists: every way of learning an object's size on
-     * S3 requires the read permission.
+     * <p>{@code HeadObject}, which transfers no body and is authorized as {@code s3:GetObject} — so a refusal
+     * means the caller cannot read, which is what distinguishes this from a listing's {@code s3:ListBucket}.
      *
-     * <p>Overrides the stat-based default so the probe does not go through {@link S3StorageObject}, whose
-     * metadata path deliberately uses a one-byte range GET — that is an optimisation for the read path, where
-     * {@code exists()} and {@code length()} on one object then cost a single request. The probe needs neither the
-     * byte nor the ETag generation pin a GET establishes, so it pays for neither.
+     * <p>Does not go through {@link S3StorageObject}: that path discovers size with a one-byte range GET so
+     * {@code exists()} and {@code length()} on one object cost a single request. This needs neither the byte nor
+     * the ETag pin a GET establishes.
      *
-     * <p>A 403 is final. The range-GET fallback that {@code exists()} uses needs the same permission and would be
-     * refused identically, so retrying only spends a request to be told the same thing.
+     * <p>A 403 is final — the range-GET fallback {@code exists()} uses needs the same permission.
      */
     @Override
     public StorageEntry probeRead(StoragePath path) throws IOException {

@@ -269,8 +269,7 @@ public class S3RequestCountingTests extends ESTestCase {
         S3StorageObject obj = new S3StorageObject(mockS3, BUCKET, KEY, PATH);
         assertTrue(obj.exists());
         assertEquals(0L, obj.length());
-        // Asking for the timestamp too is the point: before it was stamped here, this call found it unset and
-        // re-ran the whole probe, so an empty object cost two requests on every resolve.
+        // The timestamp matters as much as the length: unset, it makes this call repeat the whole probe.
         assertEquals(Instant.EPOCH, obj.lastModified());
         verify(mockS3, times(1)).getObject(any(GetObjectRequest.class));
         verify(mockS3, never()).headObject(any(HeadObjectRequest.class));

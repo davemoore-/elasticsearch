@@ -699,10 +699,9 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
      */
     private void probeObject() throws IOException {
         try {
-            // First byte, not the last: bytes=0-0 carries the same Content-Range total and a suffix range is the
-            // more expensive of the two to serve. This is the READ path's size discovery, where folding it into a
-            // GET is what lets exists() and length() on one object cost a single request. It is NOT the read-access
-            // probe — that is S3StorageProvider#probeRead, a HeadObject, which transfers nothing.
+            // Size discovery for the read path: folding it into a GET lets exists() and length() on one object
+            // cost a single request. bytes=0-0 over a suffix range — same Content-Range total, cheaper to serve.
+            // Read access is probed by S3StorageProvider#probeRead, not here.
             GetObjectRequest.Builder request = GetObjectRequest.builder().bucket(bucket).key(key).range("bytes=0-0");
             try (var response = getObject(request)) {
                 // Drain the 1-byte body so the HTTP connection returns to the pool
@@ -737,10 +736,9 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
                 // authorized answer — producing it required s3:GetObject — so this counts as a successful probe.
                 cachedExists = true;
                 cachedLength = 0L;
-                // Stamp the timestamp too, or lastModified() finds it unset and runs this whole fetch a second
-                // time for an answer the error response does not carry. EPOCH is honest for an empty object: the
-                // timestamp is only ever used as a version token for derived content, and there is no content to
-                // version. An object later given content leaves this branch entirely and gets its real mtime.
+                // Stamped here because the 416 response carries no timestamp, and leaving it unset makes
+                // lastModified() repeat the whole fetch. EPOCH is sound for an empty object: the timestamp is a
+                // version token for content, and there is none.
                 cachedLastModified = Instant.EPOCH;
             } else if (e.statusCode() == 403) {
                 // Denied, and there is nothing cheaper left to try: the fallback range GET is now the same
