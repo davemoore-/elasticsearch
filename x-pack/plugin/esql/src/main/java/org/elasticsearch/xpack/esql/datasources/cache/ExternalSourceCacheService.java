@@ -74,6 +74,8 @@ public class ExternalSourceCacheService implements Closeable {
      */
     private final Cache<SchemaCacheKey, SchemaCacheEntry> datasetAggregateCache;
     private final Cache<ListingCacheKey, FileList> listingCache;
+    /** Bound on how long a derived fact may be served; see {@link ExternalSourceCacheSettings#DERIVED_TTL}. */
+    private volatile long derivedTtlMillis;
     private final long maxTotalBytes;
     /** Byte budget for {@link #schemaCache} (one fifth of {@link #maxTotalBytes}). */
     private final long schemaBudget;
@@ -189,6 +191,7 @@ public class ExternalSourceCacheService implements Closeable {
         this.enabled = ExternalSourceCacheSettings.CACHE_ENABLED.get(settings);
 
         TimeValue listingTtl = ExternalSourceCacheSettings.LISTING_TTL.get(settings);
+        this.derivedTtlMillis = ExternalSourceCacheSettings.DERIVED_TTL.get(settings).millis();
 
         // Per-file schema stays at its established 20%; the dataset-aggregate cache gets a small dedicated
         // slice carved from listing (each dataset entry is a single row count — kilobytes suffice — so its
@@ -236,6 +239,25 @@ public class ExternalSourceCacheService implements Closeable {
     }
 
     /**
+     * Whether a derived-fact entry has outlived the window in which it may be served.
+     *
+     * <p>Checked where an entry is SERVED rather than enforced with {@code setExpireAfterWrite}: statistics
+     * enrichment re-puts the same key as a query harvests more of a dataset, and {@code Cache#put} stamps a
+     * fresh write time, so a write-expiry clock would be reset by the very reads whose entitlement this
+     * bounds. {@code cachedAtMillis} is set when the facts were derived and {@code withSafeMetadata} carries
+     * it across those re-puts, so it survives enrichment.
+     */
+    private boolean outsideDerivedWindow(SchemaCacheEntry entry) {
+        long ttl = derivedTtlMillis;
+        return ttl > 0 && entry != null && (System.currentTimeMillis() - entry.cachedAtMillis()) > ttl;
+    }
+
+    /** Applies {@link ExternalSourceCacheSettings#DERIVED_TTL} at runtime. */
+    public void setDerivedTtl(TimeValue ttl) {
+        this.derivedTtlMillis = ttl.millis();
+    }
+
+    /**
      * Returns a cached schema entry or computes it via the loader. The loader is only invoked
      * on a cache miss. When the cache is disabled, the loader is called directly (bypassing the cache).
      * <p>
@@ -249,7 +271,7 @@ public class ExternalSourceCacheService implements Closeable {
             return loader.load(key);
         }
         SchemaCacheEntry cached = schemaCache.get(key);
-        if (cached != null) {
+        if (cached != null && outsideDerivedWindow(cached) == false) {
             return cached;
         }
 
@@ -314,7 +336,8 @@ public class ExternalSourceCacheService implements Closeable {
         if (enabled == false) {
             return null;
         }
-        return schemaCache.get(key);
+        SchemaCacheEntry entry = schemaCache.get(key);
+        return outsideDerivedWindow(entry) ? null : entry;
     }
 
     /**
@@ -366,9 +389,12 @@ public class ExternalSourceCacheService implements Closeable {
             return null;
         }
         // Cache.get() already promotes the entry to the LRU head, so a hot dataset stays resident; no re-put
-        // is needed (there is no expireAfterWrite clock to refresh — the dataset cache has no TTL).
+        // is needed (there is no expireAfterWrite clock to refresh — the window is checked on serve instead).
         SchemaCacheEntry entry = datasetAggregateCache.get(key);
         if (entry == null || entry.safeMetadata().get(SourceStatisticsSerializer.STATS_ROW_COUNT) instanceof Number == false) {
+            return null;
+        }
+        if (outsideDerivedWindow(entry)) {
             return null;
         }
         return entry.safeMetadata();

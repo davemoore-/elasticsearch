@@ -186,7 +186,7 @@ public class SchemaCacheEntryTests extends ESTestCase {
                 "p",
                 Map.of(),
                 Map.of(),
-                0L,
+                System.currentTimeMillis(),
                 List.of()
             )
         );

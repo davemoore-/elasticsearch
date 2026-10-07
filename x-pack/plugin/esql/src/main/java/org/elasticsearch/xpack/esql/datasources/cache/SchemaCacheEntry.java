@@ -45,6 +45,12 @@ public record SchemaCacheEntry(
             || columnNames.length != columnSynthetics.length) {
             throw new IllegalArgumentException("All column arrays must have the same length");
         }
+        // An unstamped entry would read as arbitrarily old, and the derived-fact window is checked against this
+        // field when the entry is served — so an entry built without a derivation time would become silently
+        // unservable rather than loudly wrong. Refuse it here instead.
+        if (cachedAtMillis <= 0) {
+            throw new IllegalArgumentException("cachedAtMillis must be set to the time the facts were derived");
+        }
         safeMetadata = safeMetadata != null ? Map.copyOf(safeMetadata) : Map.of();
         connectorConfig = connectorConfig != null ? Map.copyOf(connectorConfig) : Map.of();
         warnings = warnings != null ? List.copyOf(warnings) : List.of();

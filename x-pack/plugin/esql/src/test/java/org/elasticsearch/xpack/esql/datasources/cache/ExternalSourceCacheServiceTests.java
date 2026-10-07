@@ -67,6 +67,71 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
      * changes without anything the key can see. (Its file-metadata counterpart was removed with that cache —
      * length and mtime now come from the per-resolve probe, so there is no entry to age.)
      */
+    /** An entry copied with an older derivation time, to age it without sleeping. */
+    private static SchemaCacheEntry agedBy(SchemaCacheEntry entry, long millisAgo) {
+        return new SchemaCacheEntry(
+            entry.columnNames(),
+            entry.columnTypes(),
+            entry.columnNullabilities(),
+            entry.columnSynthetics(),
+            entry.sourceType(),
+            entry.location(),
+            entry.safeMetadata(),
+            entry.connectorConfig(),
+            System.currentTimeMillis() - millisAgo,
+            entry.warnings()
+        );
+    }
+
+    /**
+     * The glob rail cannot prove read access per file on every query — a ten-thousand-file listing makes that
+     * unaffordable — so the window in which its derived facts may be served is bounded by time instead. Past
+     * the window the entry is not served, however valid the facts themselves still are.
+     */
+    public void testDerivedFactsAreNotServedPastTheWindow() throws Exception {
+        Settings settings = Settings.builder()
+            .put("esql.external.cache.size", "10mb")
+            .put("esql.external.cache.enabled", true)
+            .put("esql.external.cache.derived.ttl", "20m")
+            .build();
+        try (ExternalSourceCacheService service = new ExternalSourceCacheService(settings)) {
+            SchemaCacheKey key = SchemaCacheKey.build("s3://bucket/data/file.parquet", 1000L, ".parquet", "", Map.of());
+
+            SchemaCacheEntry fresh = testSchemaEntry();
+            service.putSchema(key, fresh);
+            assertNotNull("a fresh entry is served", service.getSchemaIfPresent(key));
+
+            service.putSchema(key, agedBy(fresh, TimeValue.timeValueMinutes(21).millis()));
+            assertNull("past the window the entry is not served", service.getSchemaIfPresent(key));
+
+            AtomicInteger loads = new AtomicInteger();
+            service.getOrComputeSchema(key, k -> {
+                loads.incrementAndGet();
+                return testSchemaEntry();
+            });
+            assertEquals("and the loader runs again, so the read is retaken", 1, loads.get());
+        }
+    }
+
+    /**
+     * Zero means unbounded, matching the convention the listing TTL and the wider ecosystem use: an operator
+     * who wants the old behaviour back sets it, and gets it, rather than guessing at a very large value.
+     */
+    public void testDerivedWindowOfZeroIsUnbounded() throws Exception {
+        Settings settings = Settings.builder()
+            .put("esql.external.cache.size", "10mb")
+            .put("esql.external.cache.enabled", true)
+            .put("esql.external.cache.derived.ttl", "0")
+            .build();
+        try (ExternalSourceCacheService service = new ExternalSourceCacheService(settings)) {
+            SchemaCacheKey key = SchemaCacheKey.build("s3://bucket/data/file.parquet", 1000L, ".parquet", "", Map.of());
+
+            SchemaCacheEntry entry = testSchemaEntry();
+            service.putSchema(key, agedBy(entry, TimeValue.timeValueDays(30).millis()));
+            assertNotNull("with no window configured an ancient entry is still served", service.getSchemaIfPresent(key));
+        }
+    }
+
     public void testListingExpiresAfterWrite() throws Exception {
         Settings settings = Settings.builder()
             .put("esql.external.cache.size", "10mb")

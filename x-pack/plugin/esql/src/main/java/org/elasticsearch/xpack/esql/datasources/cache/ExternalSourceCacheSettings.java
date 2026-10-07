@@ -93,7 +93,8 @@ public final class ExternalSourceCacheSettings {
     );
 
     // Only the listing cache carries a time-based refresh: it discovers file identity and has no per-file
-    // key to invalidate on. The schema and dataset-aggregate caches invalidate by identity, not by a clock.
+    // key to invalidate on. The schema and dataset-aggregate caches invalidate by identity; DERIVED_TTL bounds
+    // how long they may serve, which is a different question from whether their inputs moved.
     // Default is five minutes after write (the deprecated key's default; this key falls back to it). A file
     // added or removed becomes visible on the next query once that elapses. Lower the setting for faster
     // visibility. File metadata (length, mtime) shares this TTL. Re-lists stay query-triggered.
@@ -121,6 +122,29 @@ public final class ExternalSourceCacheSettings {
      * larger grids (≥32 MB) coarsen a representative shard to &lt;60 stripes, blunting per-stripe min/max
      * pruning. 8 MB is the knee.
      */
+    /**
+     * How long a derived fact — an inferred schema, a row count, a column extremum — may be served after the
+     * read that produced it. This is not a freshness bound: the identity keys already miss when the inputs move.
+     * It bounds something no key can see, which is the caller's entitlement being withdrawn at the store while
+     * every component of the key stays fixed.
+     * <p>
+     * The single-file rail does not need this — it probes storage on every resolve, so entitlement is
+     * established per query. The glob rail does, because proving read on each of a ten-thousand-file listing
+     * per query does not scale, so time is the only bound available to it.
+     * <p>
+     * Twenty minutes follows {@code CachingUsernamePasswordRealm}, whose cache bounds an entitlement owned
+     * outside Elasticsearch for the same reason. {@code 0} means unbounded, and costs one cold re-harvest per
+     * dataset per window when set — the entries it discards are still valid as facts, which is the price of
+     * bounding something the facts cannot tell you.
+     */
+    public static final Setting<TimeValue> DERIVED_TTL = Setting.timeSetting(
+        "esql.external.cache.derived.ttl",
+        TimeValue.timeValueMinutes(20),
+        TimeValue.timeValueMillis(0),
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     public static final Setting<ByteSizeValue> STRIPE_SIZE = Setting.byteSizeSetting(
         "esql.external.cache.stripe.size",
         ByteSizeValue.ofMb(8),
@@ -265,6 +289,7 @@ public final class ExternalSourceCacheSettings {
             CACHE_ENABLED,
             CACHE_ENABLED_OLD,
             SCHEMA_TTL,
+            DERIVED_TTL,
             LISTING_TTL,
             LISTING_TTL_OLD,
             STRIPE_SIZE,
