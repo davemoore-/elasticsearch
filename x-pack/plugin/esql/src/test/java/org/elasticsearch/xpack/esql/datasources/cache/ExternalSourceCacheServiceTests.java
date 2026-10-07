@@ -78,7 +78,7 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
         );
     }
 
-    /** The third gate: the dataset aggregate is the glob rail's warm answer, so the window covers it too. */
+    /** The dataset aggregate is the glob read path's warm answer, so the window covers it as well. */
     public void testDatasetAggregateIsNotServedPastTheTtl() throws Exception {
         Settings settings = Settings.builder()
             .put("esql.external.cache.size", "10mb")

@@ -43,23 +43,20 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.function.LongFunction;
 
 /**
- * Coordinator-only, in-memory cache service for external source metadata. Maintains four independent caches:
+ * Coordinator-only, in-memory cache service for external source metadata. Maintains three independent caches:
  * <ul>
  *   <li>Per-file schema cache (~20% of budget) — schema + the per-file {@code _stats.*} overlay, keyed by
  *       {@code (path, mtime, config)}. No time expiry: a changed file has a new mtime, hence a new key.</li>
  *   <li>Dataset-aggregate cache (~2% of budget) — the memoized whole-dataset row count, keyed by the
  *       file-set fingerprint. No time expiry; kept separate so per-file churn cannot evict it.</li>
- *   <li>File-metadata cache (count-bounded, listing TTL, five minutes by default) — {@code {length, mtime}}
- *       per path, so a repeated resolve skips the stat. Like listing it is freshness-discovery (it holds the
- *       CURRENT mtime, which gates the identity-keyed caches above), so it keeps that TTL.</li>
  *   <li>Listing cache (~78% of budget, five minutes by default) — the file set under a prefix, isolated by
  *       credential hash. Discovers file identity and has no per-file key to invalidate on, hence the TTL.</li>
  * </ul>
- * The identity-keyed caches (schema, dataset-aggregate) are bounded by weight + LRU, and by SCHEMA_TTL on serve — a
- * timer would only discard still-valid, expensively harvested entries. Both also refuse a single entry
- * heavier than a quarter of that cache's own budget so one oversized harvest cannot flush the working set.
- * The discovery caches (file-metadata, listing) keep a short TTL because they hold current-mtime freshness
- * with no identity key to key on.
+ * The identity-keyed caches (schema, dataset-aggregate) are bounded by weight + LRU, and by SCHEMA_TTL when an
+ * entry is served — that bound is not about freshness, which the keys already handle, but about how long facts
+ * are reused after the read that established access to them. Both also refuse a single entry heavier than a
+ * quarter of that cache's own budget so one oversized harvest cannot flush the working set. The listing cache
+ * keeps a short write TTL because it discovers file identity and has no per-file key to invalidate on.
  */
 public class ExternalSourceCacheService implements Closeable {
 
@@ -197,9 +194,9 @@ public class ExternalSourceCacheService implements Closeable {
 
         // No setExpireAfterWrite on schemaCache or datasetAggregateCache: both are identity-keyed (per-file by
         // mtime, dataset by file-set fingerprint), so a changed input already misses. A timer would only
-        // discard still-valid, expensively harvested entries on a clock. The two discovery caches below
-        // (listing and file-metadata) DO keep the listing TTL — they hold current file identity with no
-        // per-file key to invalidate on, so they must refresh on a clock.
+        // discard still-valid, expensively harvested entries on a clock, which is why SCHEMA_TTL is checked on
+        // serve rather than being a write-expiry here. The listing cache below DOES keep a write TTL — it holds
+        // current file identity with no per-file key to invalidate on, so it must refresh on a clock.
         this.schemaCache = CacheBuilder.<SchemaCacheKey, SchemaCacheEntry>builder()
             .setMaximumWeight(schemaBudget)
             .weigher((key, value) -> value.estimatedBytes())
@@ -254,6 +251,10 @@ public class ExternalSourceCacheService implements Closeable {
             return false;
         }
         store.invalidate(key, entry);
+        // Book the miss. The get that found this entry counted a hit, which is the wrong signal for a lookup
+        // that served nothing; this second get records the miss and returns null now the entry is gone, so
+        // hits/(hits+misses) stays a measure of what the cache actually answered.
+        store.get(key);
         return true;
     }
 
@@ -426,8 +427,10 @@ public class ExternalSourceCacheService implements Closeable {
      * {@link ExternalSourceCacheSettings#SCHEMA_TTL} after the last read that established access. Dating it by
      * the oldest contributor makes the aggregate expire no later than the facts it was folded from.
      *
-     * <p>Falls back to now when no contributor is found, which is the reconcile path: that aggregate comes from
-     * a scan rather than from cached entries, so now is when it was derived.
+     * <p>Falls back to now only when no contributor is in the cache. Both write paths pass their paths: the
+     * promise-fulfilment path looks like a fresh scan but need not be one — {@code commitStripeDelta}'s fold is
+     * "possibly assembled across queries", reading stripes off cached entries, so an aggregate completed now can
+     * rest on facts proven much earlier.
      */
     public void putDatasetAggregate(SchemaCacheKey key, long rowCount, String sourceType, String location, Set<String> contributingPaths) {
         if (enabled == false || key == null || rowCount < 0) {
@@ -690,7 +693,13 @@ public class ExternalSourceCacheService implements Closeable {
         for (PendingDatasetAggregate pending : candidates) {
             Long sum = sumIfFullyCovered(pending, completedWholeFile);
             if (sum != null) {
-                putDatasetAggregate(pending.datasetKey(), sum, pending.sourceType(), pending.location());
+                putDatasetAggregate(
+                    pending.datasetKey(),
+                    sum,
+                    pending.sourceType(),
+                    pending.location(),
+                    pending.pathToMtimeMillis().keySet()
+                );
                 synchronized (pendingDatasetAggregates) {
                     pendingDatasetAggregates.remove(pending.datasetKey());
                 }
@@ -883,6 +892,10 @@ public class ExternalSourceCacheService implements Closeable {
         return oldest[0] == Long.MAX_VALUE ? now : oldest[0];
     }
 
+    /**
+     * Pre-write snapshot of the contribution paths' entries, so a sibling evicted by the first commit's put can
+     * still be recovered. See the body for why this is one whole-cache forEach rather than per-path gets.
+     */
     private Map<String, List<Map.Entry<SchemaCacheKey, SchemaCacheEntry>>> snapshotEntriesByPath(Set<String> paths) {
         if (paths.size() < 2) {
             return Map.of(); // no sibling to evict — the fallback is never consulted; skip the whole-cache sweep

@@ -68,9 +68,10 @@ public final class ExternalSourceCacheSettings {
 
     /**
      * Deprecated no-op. The schema (per-file) and dataset-aggregate caches are invalidated by identity
-     * (mtime / file-set fingerprint in the key) and bounded by CACHE_SIZE + LRU, with {@link #SCHEMA_TTL} bounding how long an entry may be served — see
-     * {@link ExternalSourceCacheService}. This setting formerly capped the schema cache with a hard TTL;
-     * it is retained, registered, and ignored so a node that carries it in {@code elasticsearch.yml} from
+     * (mtime / file-set fingerprint in the key) and bounded by CACHE_SIZE + LRU, with {@link #SCHEMA_TTL}
+     * bounding how long an entry may be served — see {@link ExternalSourceCacheService}. This setting formerly
+     * capped the schema cache with a hard TTL; it is retained, registered, and ignored so a node that carries
+     * it in {@code elasticsearch.yml} from
      * an earlier version still starts (removing a released node setting would fail startup). It is wired to
      * nothing and emits a deprecation warning when set.
      */
