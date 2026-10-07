@@ -70,6 +70,11 @@ public interface StorageProvider extends Closeable {
      * <p>Not {@link #exists}, which returns neither the length nor the last-modified this answer carries, so a
      * caller needing the object's version token would have to ask twice.
      *
+     * <p>Never carries a null modification time, whatever the provider reports: {@link StorageEntry} substitutes
+     * EPOCH, which keeps a key derived from it stable. Providers with no time to report include gRPC/Flight and the
+     * GCS and Azure fixtures; one whose time is never trustworthy reports {@link #supportsStableMetadata()} false
+     * and takes itself out of caching entirely.
+     *
      * <p>Defaulted rather than abstract because there is one correct generic answer, probe by stat. The default
      * asks storage and reports what it said. Override only to wrap the call.
      */

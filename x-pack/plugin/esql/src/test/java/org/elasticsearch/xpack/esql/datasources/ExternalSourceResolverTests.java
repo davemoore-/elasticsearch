@@ -6252,6 +6252,32 @@ public class ExternalSourceResolverTests extends ESTestCase {
     }
 
     /**
+     * A provider that reports no modification time still resolves on the strict rail. gRPC/Flight and the GCS and
+     * Azure fixtures report none, and the rail probes without consulting {@code isCacheable}, so the probe's answer
+     * reaches key derivation whatever the provider has: EPOCH standing in for a missing time is what keeps the
+     * derived key buildable.
+     */
+    public void testStrictResolveSucceedsWhenTheProviderReportsNoModificationTime() throws Exception {
+        String file = "s3://bucket/data/strict.parquet";
+        Map<String, List<Attribute>> schemasByPath = Map.of(file, List.of(attr("n", DataType.LONG)));
+        NoModificationTimeStorageProvider provider = new NoModificationTimeStorageProvider(schemasByPath);
+
+        Map<String, DatasetFieldMapping> props = new LinkedHashMap<>();
+        props.put("n", new DatasetFieldMapping("long", null));
+        DatasetMapping mapping = new DatasetMapping(new DatasetMapping.Mappings(DatasetMapping.Dynamic.FALSE, props));
+
+        Settings settings = Settings.builder().put("esql.external.cache.size", "10mb").put("esql.external.cache.enabled", true).build();
+
+        try (ExternalSourceCacheService cacheService = new ExternalSourceCacheService(settings)) {
+            ExternalSourceResolver resolver = createResolverWithCache(provider, schemasByPath, cacheService);
+
+            PlainActionFuture<ExternalSourceResolution> f = new PlainActionFuture<>();
+            resolver.resolve(List.of(file), Map.of(file, new HashMap<>()), null, Map.of(file, mapping), null, f);
+            assertNotNull("a missing modification time is not a failure to resolve", f.actionGet().resolvedSource(file));
+        }
+    }
+
+    /**
      * A probe that cannot be performed is not an answer, so it must not read as permission. The point of probing
      * is that it never fails open: an outage propagates as an outage rather than being swallowed into a serve.
      */
@@ -9080,6 +9106,33 @@ public class ExternalSourceResolverTests extends ESTestCase {
         @Override
         public void close() {
             delegate.close();
+        }
+    }
+
+    /**
+     * A provider whose objects report no modification time, as gRPC/Flight and the GCS and Azure fixtures do.
+     * Only {@code newObject(StoragePath)} is overridden, because that is the overload the read-access probe uses.
+     */
+    private static class NoModificationTimeStorageProvider extends CountingStorageProvider {
+        NoModificationTimeStorageProvider(Map<String, List<Attribute>> schemasByPath) {
+            super(Map.of(), schemasByPath);
+        }
+
+        @Override
+        public StorageObject newObject(StoragePath path) {
+            return new NoModificationTimeStorageObject(path, 1024L, metadataProbeCount);
+        }
+    }
+
+    /** The object half of {@link NoModificationTimeStorageProvider}. */
+    private static final class NoModificationTimeStorageObject extends StubStorageObject {
+        NoModificationTimeStorageObject(StoragePath path, long length, AtomicInteger probeCount) {
+            super(path, length, probeCount);
+        }
+
+        @Override
+        public Instant lastModified() {
+            return null;
         }
     }
 
