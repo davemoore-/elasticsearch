@@ -484,6 +484,39 @@ public class ExternalErrorSurfaceIT extends ESRestTestCase {
         assertThat(reason, containsString("403"));
     }
 
+    /**
+     * The denial that the read path does not catch, which is why it belongs beside the case above rather than in it.
+     * A {@code LIMIT} query reaches a data-node read, so a withdrawn permission surfaces there. An ungrouped
+     * {@code COUNT(*)} is answered from the statistics a previous query cached and touches no object at all, so
+     * before the resolve path probed per query the second count was served from facts the caller could no longer
+     * read — and nothing failed, which is the whole defect.
+     */
+    public void testWarmCountIsRefusedAfterReadAccessIsWithdrawn() throws IOException {
+        String key = "data/warm_count_denied.csv";
+        seed(key, "id,city\n1,Vienna\n2,Graz\n");
+        putDataSource("warm_count_ds", staticCredentialSettings());
+        putDataset("warm_count", "warm_count_ds", s3(key), Map.of("region", regionSupplier.get()), null);
+
+        // Warm the statistics: this read populates the row count the next query would otherwise be served.
+        runEsql("FROM warm_count | STATS COUNT(*)");
+
+        s3HttpFixture.denyKey(
+            key,
+            "User: arn:aws:sts::123456789012:assumed-role/reader/session is not authorized to perform: s3:GetObject "
+                + "on resource: arn:aws:s3:::bucket/data/warm_count_denied.csv with an explicit deny in an "
+                + "identity-based policy"
+        );
+
+        ResponseException e = expectThrows(ResponseException.class, () -> runEsql("FROM warm_count | STATS COUNT(*)"));
+
+        String raw = EntityUtils.toString(e.getResponse().getEntity(), StandardCharsets.UTF_8);
+        assertThat("the refusal must not relay the principal or resource ARNs", raw, not(containsString("arn:aws:")));
+        assertThat(raw, not(containsString("assumed-role")));
+        Map<String, Object> body = XContentHelper.convertToMap(JsonXContent.jsonXContent, raw, false);
+        String reason = str(((Map<?, ?>) body.get("error")).get("reason"));
+        assertThat("the caller is told access was refused, not given a count", reason, containsString("403"));
+    }
+
     // -------- the reported case ------------------------------------------------------------------
 
     /**
