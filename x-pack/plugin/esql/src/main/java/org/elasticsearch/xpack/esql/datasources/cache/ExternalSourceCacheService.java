@@ -55,7 +55,7 @@ import java.util.function.LongFunction;
  *   <li>Listing cache (~78% of budget, five minutes by default) — the file set under a prefix, isolated by
  *       credential hash. Discovers file identity and has no per-file key to invalidate on, hence the TTL.</li>
  * </ul>
- * The identity-keyed caches (schema, dataset-aggregate) are bounded by weight + LRU, never by a clock — a
+ * The identity-keyed caches (schema, dataset-aggregate) are bounded by weight + LRU, and by SCHEMA_TTL on serve — a
  * timer would only discard still-valid, expensively harvested entries. Both also refuse a single entry
  * heavier than a quarter of that cache's own budget so one oversized harvest cannot flush the working set.
  * The discovery caches (file-metadata, listing) keep a short TTL because they hold current-mtime freshness
@@ -69,7 +69,7 @@ public class ExternalSourceCacheService implements Closeable {
     /**
      * The memoized whole-dataset row-count aggregate, keyed by file-set fingerprint. Tiny per entry but
      * expensive to rebuild (a full cold scan), so it gets its OWN cache: sharing the per-file budget let
-     * per-file churn evict it and the warm dataset {@code COUNT} decayed mid-use. No time expiry — the
+     * per-file churn evict it and the warm dataset {@code COUNT} decayed mid-use. No write-expiry clock — the
      * fingerprint is a correct-or-miss identity key; only weight/LRU reclaims it.
      */
     private final Cache<SchemaCacheKey, SchemaCacheEntry> datasetAggregateCache;
@@ -241,6 +241,22 @@ public class ExternalSourceCacheService implements Closeable {
         return ttl > 0 && entry != null && (System.currentTimeMillis() - entry.cachedAtMillis()) > ttl;
     }
 
+    /**
+     * Rejects an entry past the window and drops it from the store.
+     *
+     * <p>Evicting matters as much as refusing to serve: the {@code get} that found it has already promoted it to
+     * the LRU head, so an entry that will never be served again would otherwise hold its share of the budget
+     * until something replaced it — and would keep being promoted by every lookup that rejected it. The
+     * conditional invalidate leaves a concurrently written replacement alone.
+     */
+    private boolean rejectIfOutsideSchemaTtl(Cache<SchemaCacheKey, SchemaCacheEntry> store, SchemaCacheKey key, SchemaCacheEntry entry) {
+        if (outsideSchemaTtl(entry) == false) {
+            return false;
+        }
+        store.invalidate(key, entry);
+        return true;
+    }
+
     /** Applies {@link ExternalSourceCacheSettings#SCHEMA_TTL} at runtime. */
     public void setSchemaTtl(TimeValue ttl) {
         this.schemaTtlMillis = ttl.millis();
@@ -260,7 +276,10 @@ public class ExternalSourceCacheService implements Closeable {
             return loader.load(key);
         }
         SchemaCacheEntry cached = schemaCache.get(key);
-        if (cached != null && outsideSchemaTtl(cached) == false) {
+        if (rejectIfOutsideSchemaTtl(schemaCache, key, cached)) {
+            cached = null;
+        }
+        if (cached != null) {
             return cached;
         }
 
@@ -326,7 +345,7 @@ public class ExternalSourceCacheService implements Closeable {
             return null;
         }
         SchemaCacheEntry entry = schemaCache.get(key);
-        return outsideSchemaTtl(entry) ? null : entry;
+        return rejectIfOutsideSchemaTtl(schemaCache, key, entry) ? null : entry;
     }
 
     /**
@@ -383,7 +402,7 @@ public class ExternalSourceCacheService implements Closeable {
         if (entry == null || entry.safeMetadata().get(SourceStatisticsSerializer.STATS_ROW_COUNT) instanceof Number == false) {
             return null;
         }
-        if (outsideSchemaTtl(entry)) {
+        if (rejectIfOutsideSchemaTtl(datasetAggregateCache, key, entry)) {
             return null;
         }
         return entry.safeMetadata();
@@ -393,12 +412,28 @@ public class ExternalSourceCacheService implements Closeable {
      * Stores the dataset-level row-count aggregate for one resolved file set into the dedicated
      * {@link #datasetAggregateCache}. The entry is a synthetic {@link SchemaCacheEntry} (no columns;
      * {@code safeMetadata} = the row count) so the common cache plumbing — weigher, enable/disable,
-     * clearAll, usage stats — applies unchanged; only the store (and its budget, no-TTL policy) differs.
+     * clearAll, usage stats — applies unchanged; only the store and its budget differ.
      */
     public void putDatasetAggregate(SchemaCacheKey key, long rowCount, String sourceType, String location) {
+        putDatasetAggregate(key, rowCount, sourceType, location, Set.of());
+    }
+
+    /**
+     * As above, dated by the oldest per-file entry that contributed rather than by now.
+     *
+     * <p>The aggregate is assembled from per-file entries that may already be most of the way through their
+     * window, so stamping it with the current time would let the row count be served for up to twice
+     * {@link ExternalSourceCacheSettings#SCHEMA_TTL} after the last read that established access. Dating it by
+     * the oldest contributor makes the aggregate expire no later than the facts it was folded from.
+     *
+     * <p>Falls back to now when no contributor is found, which is the reconcile path: that aggregate comes from
+     * a scan rather than from cached entries, so now is when it was derived.
+     */
+    public void putDatasetAggregate(SchemaCacheKey key, long rowCount, String sourceType, String location, Set<String> contributingPaths) {
         if (enabled == false || key == null || rowCount < 0) {
             return;
         }
+        long derivedAtMillis = oldestContribution(contributingPaths);
         SchemaCacheEntry entry = new SchemaCacheEntry(
             new String[0],
             new DataType[0],
@@ -408,7 +443,7 @@ public class ExternalSourceCacheService implements Closeable {
             location,
             Map.of(SourceStatisticsSerializer.STATS_ROW_COUNT, rowCount),
             Map.of(),
-            System.currentTimeMillis(),
+            derivedAtMillis,
             List.of()
         );
         if (entry.estimatedBytes() > datasetAggregateMaxEntryBytes) {
@@ -827,6 +862,27 @@ public class ExternalSourceCacheService implements Closeable {
      * hot-path scan cost). Freshness (mtime) and config-fingerprint discrimination are NOT applied here —
      * {@link #collectMatchingEntries} re-checks both, exactly as it does for live matches.
      */
+    /**
+     * The earliest {@code cachedAtMillis} among per-file entries on the given paths, or now when there are none.
+     *
+     * <p>One path-filtered {@code forEach}, the same enumeration {@link #snapshotEntriesByPath} uses and for the
+     * same reason: a path alone does not reconstruct a multi-component key. Only reached when a dataset
+     * aggregate is first written, never on a warm resolve.
+     */
+    private long oldestContribution(Set<String> paths) {
+        long now = System.currentTimeMillis();
+        if (paths.isEmpty()) {
+            return now;
+        }
+        long[] oldest = { Long.MAX_VALUE };
+        schemaCache.forEach((key, entry) -> {
+            if (paths.contains(key.canonicalPath()) && entry.cachedAtMillis() < oldest[0]) {
+                oldest[0] = entry.cachedAtMillis();
+            }
+        });
+        return oldest[0] == Long.MAX_VALUE ? now : oldest[0];
+    }
+
     private Map<String, List<Map.Entry<SchemaCacheKey, SchemaCacheEntry>>> snapshotEntriesByPath(Set<String> paths) {
         if (paths.size() < 2) {
             return Map.of(); // no sibling to evict — the fallback is never consulted; skip the whole-cache sweep

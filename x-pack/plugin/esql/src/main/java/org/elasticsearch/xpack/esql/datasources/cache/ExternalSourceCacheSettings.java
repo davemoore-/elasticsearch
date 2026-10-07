@@ -17,7 +17,7 @@ import java.util.List;
 
 /**
  * Cluster settings for ESQL external source caching.
- * Everything here is restart-only (NodeScope)  except the enabled flag and the schema TTL, both of
+ * Everything here is restart-only (NodeScope) except the enabled flag and the schema TTL, both of
  * which are dynamic and wired to live consumers in {@code EsqlPlugin.createComponents}. A setting must not be declared Dynamic unless a
  * {@code ClusterSettings.addSettingsUpdateConsumer} actually observes updates — a Dynamic flag without a
  * consumer accepts runtime updates and silently ignores them.
@@ -68,7 +68,7 @@ public final class ExternalSourceCacheSettings {
 
     /**
      * Deprecated no-op. The schema (per-file) and dataset-aggregate caches are invalidated by identity
-     * (mtime / file-set fingerprint in the key) and bounded by CACHE_SIZE + LRU, never by a clock — see
+     * (mtime / file-set fingerprint in the key) and bounded by CACHE_SIZE + LRU, with {@link #SCHEMA_TTL} bounding how long an entry may be served — see
      * {@link ExternalSourceCacheService}. This setting formerly capped the schema cache with a hard TTL;
      * it is retained, registered, and ignored so a node that carries it in {@code elasticsearch.yml} from
      * an earlier version still starts (removing a released node setting would fail startup). It is wired to
@@ -93,7 +93,7 @@ public final class ExternalSourceCacheSettings {
     );
 
     // Only the listing cache carries a time-based refresh: it discovers file identity and has no per-file
-    // key to invalidate on. The schema and dataset-aggregate caches invalidate by identity; REVALIDATE_INTERVAL bounds
+    // key to invalidate on. The schema and dataset-aggregate caches invalidate by identity; SCHEMA_TTL bounds
     // how long they may serve, which is a different question from whether their inputs moved.
     // Default is five minutes after write (the deprecated key's default; this key falls back to it). A file
     // added or removed becomes visible on the next query once that elapses. Lower the setting for faster
@@ -111,9 +111,12 @@ public final class ExternalSourceCacheSettings {
      * freshness bound — the identity keys already miss when a file moves — but a bound on entitlement being
      * withdrawn at the store while every component of the key stays fixed.
      * <p>
-     * Only the glob read path needs it: a single-file read probes storage every query, while proving read on
+     * Only the glob read path *needs* it — a single-file read probes storage every query, while proving read on
      * each file of a large listing every query does not scale, so re-deriving is the only moment access is
-     * re-checked there. {@code 0} is unbounded. A window costs one cold re-read per dataset per period.
+     * re-checked there. It nonetheless applies to every entry in these stores: a per-file key and a single-file
+     * key are indistinguishable here, both carrying a null file-set fingerprint, so the window cannot be scoped
+     * to one rail from inside the cache. Single-file entries therefore also re-derive each period, which costs a
+     * re-harvest it does not need. {@code 0} is unbounded.
      * <p>
      * Unlike {@link #LISTING_TTL}, this does not fall back to its deprecated {@code esql.source.cache.*}
      * counterpart. That key shipped documented as ignored, so a deployment may carry a value for it that
@@ -127,6 +130,23 @@ public final class ExternalSourceCacheSettings {
         Setting.Property.Dynamic
     );
 
+    /**
+     * Canonical stripe size for row-format external-source statistics, in file/decompressed-stream
+     * bytes. A stripe is a pure ADDRESSING grid over file content: the reader attributes each record to
+     * stripe {@code floor(recordStartOffset / B)} as it parses, and stats are captured, deduplicated,
+     * and cached per stripe (see {@code ExternalSourceCacheService}). It is orthogonal to partitioning
+     * — chunk dispatch, macro-splits, and parallelism are unaffected; the grid only determines which
+     * stripe a record's stats land in. The value participates in stripe identity, so it is restart-only
+     * and cluster-uniform: changing it simply makes previously cached stripe entries unmatchable (a
+     * clean invalidation, never a mixed grid).
+     * <p>
+     * Default 8 MB, derived (not arbitrary) from the ClickBench text-format file-size distribution
+     * against the schema-cache budget: a representative ~1.8 GB shard yields ~231 stripes (ample
+     * pruning resolution), and a 500-hot-file working set consumes ~11 MB — 42% of the ~26 MB schema
+     * budget on a 32 GB heap. Smaller grids (≤1 MB) overflow the budget on realistic working sets;
+     * larger grids (≥32 MB) coarsen a representative shard to &lt;60 stripes, blunting per-stripe min/max
+     * pruning. 8 MB is the knee.
+     */
     public static final Setting<ByteSizeValue> STRIPE_SIZE = Setting.byteSizeSetting(
         "esql.external.cache.stripe.size",
         ByteSizeValue.ofMb(8),

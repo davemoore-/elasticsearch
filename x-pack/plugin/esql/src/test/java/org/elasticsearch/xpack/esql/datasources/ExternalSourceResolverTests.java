@@ -6252,6 +6252,39 @@ public class ExternalSourceResolverTests extends ESTestCase {
     }
 
     /**
+     * A probe that cannot be performed is not an answer, so it must not read as permission. The point of probing
+     * is that it never fails open: an outage propagates as an outage rather than being swallowed into a serve.
+     */
+    public void testAnOutageDuringTheProbeFailsTheResolveRatherThanServing() throws Exception {
+        List<Attribute> schema = List.of(attr("id", DataType.INTEGER));
+        Map<String, List<Attribute>> schemasByPath = new HashMap<>();
+        schemasByPath.put("s3://bucket/data/single.parquet", schema);
+
+        RevocableStorageProvider provider = new RevocableStorageProvider(schemasByPath, Condition.STORE_UNAVAILABLE);
+
+        Settings settings = Settings.builder().put("esql.external.cache.size", "10mb").put("esql.external.cache.enabled", true).build();
+
+        try (ExternalSourceCacheService cacheService = new ExternalSourceCacheService(settings)) {
+            ExternalSourceResolver resolver = createResolverWithCache(provider, schemasByPath, cacheService);
+
+            PlainActionFuture<ExternalSourceResolution> cold = new PlainActionFuture<>();
+            resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), cold);
+            assertNotNull(cold.actionGet().resolvedSource("s3://bucket/data/single.parquet"));
+
+            provider.readRevoked.set(true);
+
+            PlainActionFuture<ExternalSourceResolution> warm = new PlainActionFuture<>();
+            resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), warm);
+            Exception e = expectThrows(Exception.class, warm::actionGet);
+            assertThat(
+                "an unavailable store must not be reported as a refusal, nor swallowed into a warm serve",
+                ExceptionsHelper.unwrapCause(e).getMessage() + ExceptionsHelper.unwrapCause(e).getClass().getSimpleName(),
+                not(containsString("ACCESS_DENIED"))
+            );
+        }
+    }
+
+    /**
      * The case no cache key can represent: the credential is unchanged, every component of the schema key is
      * unchanged, and the policy behind it has been edited so the object is no longer readable. Nothing on this
      * side moves, so only asking storage detects it — which the resolve now does on every resolve.
@@ -8998,23 +9031,30 @@ public class ExternalSourceResolverTests extends ESTestCase {
         final AtomicInteger metadataProbeCount = new AtomicInteger();
         private final StubStorageProvider delegate;
 
+        private final Condition condition;
+
         RevocableStorageProvider(Map<String, List<Attribute>> schemasByPath) {
+            this(schemasByPath, Condition.ACCESS_DENIED);
+        }
+
+        RevocableStorageProvider(Map<String, List<Attribute>> schemasByPath, Condition condition) {
             this.delegate = new StubStorageProvider(Map.of(), schemasByPath, metadataProbeCount);
+            this.condition = condition;
         }
 
         @Override
         public StorageObject newObject(StoragePath path) {
-            return new RevocableStorageObject(path, 0, metadataProbeCount, readRevoked);
+            return new RevocableStorageObject(path, 0, metadataProbeCount, readRevoked, condition);
         }
 
         @Override
         public StorageObject newObject(StoragePath path, long length) {
-            return new RevocableStorageObject(path, length, metadataProbeCount, readRevoked);
+            return new RevocableStorageObject(path, length, metadataProbeCount, readRevoked, condition);
         }
 
         @Override
         public StorageObject newObject(StoragePath path, long length, Instant lastModified) {
-            return new RevocableStorageObject(path, length, metadataProbeCount, readRevoked);
+            return new RevocableStorageObject(path, length, metadataProbeCount, readRevoked, condition);
         }
 
         @Override
@@ -9046,16 +9086,18 @@ public class ExternalSourceResolverTests extends ESTestCase {
     /** The object half of {@link RevocableStorageProvider}. */
     private static class RevocableStorageObject extends StubStorageObject {
         private final AtomicBoolean readRevoked;
+        private final Condition condition;
 
-        RevocableStorageObject(StoragePath path, long length, AtomicInteger probeCount, AtomicBoolean readRevoked) {
+        RevocableStorageObject(StoragePath path, long length, AtomicInteger probeCount, AtomicBoolean readRevoked, Condition condition) {
             super(path, length, probeCount);
             this.readRevoked = readRevoked;
+            this.condition = condition;
         }
 
         @Override
         public Instant lastModified() {
             if (readRevoked.get()) {
-                throw new ExternalClientException(Condition.ACCESS_DENIED, path(), "", "");
+                throw new ExternalClientException(condition, path(), "", "");
             }
             return super.lastModified();
         }

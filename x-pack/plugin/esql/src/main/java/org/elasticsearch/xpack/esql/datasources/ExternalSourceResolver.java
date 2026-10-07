@@ -57,7 +57,6 @@ import org.elasticsearch.xpack.esql.datasources.spi.FileList;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.HeapEstimates;
 import org.elasticsearch.xpack.esql.datasources.spi.ListingHint;
-import org.elasticsearch.xpack.esql.datasources.spi.ReadOutcome;
 import org.elasticsearch.xpack.esql.datasources.spi.SimpleSourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.SkipWarnings;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
@@ -1971,11 +1970,8 @@ public class ExternalSourceResolver {
      * without the mtime returned here — a call site obtaining an mtime another way would bypass it.
      */
     private FileMetadata fileMetadataOf(StoragePath storagePath, StorageProvider provider) throws Exception {
-        return switch (provider.probeRead(storagePath)) {
-            case ReadOutcome.Readable readable -> new FileMetadata(readable.length(), readable.lastModified().toEpochMilli());
-            case ReadOutcome.Denied denied -> throw denied.failure();
-            case ReadOutcome.Absent absent -> throw absent.failure();
-        };
+        StorageEntry probed = provider.probeRead(storagePath);
+        return new FileMetadata(probed.length(), probed.lastModified().toEpochMilli());
     }
 
     /**
@@ -2331,7 +2327,13 @@ public class ExternalSourceResolver {
                 // immediately is a pre-existing main bug tracked separately (GA issue); this guard only
                 // keeps the dataset aggregate from memoizing it.
                 if (rowCount instanceof Number n && listingPathsAreDistinct(listing)) {
-                    cacheService.putDatasetAggregate(datasetKey, n.longValue(), referenceMeta.sourceType(), listing.originalPattern());
+                    cacheService.putDatasetAggregate(
+                        datasetKey,
+                        n.longValue(),
+                        referenceMeta.sourceType(),
+                        listing.originalPattern(),
+                        listingPaths(listing)
+                    );
                 }
             }
             return aggregatedStats;
@@ -2372,6 +2374,15 @@ public class ExternalSourceResolver {
      * the write-through path so the common warm-non-evicted resolve pays the O(N) scan only when it writes,
      * not on every key-mint.
      */
+    /** The listing's paths, so a dataset aggregate can be dated by the oldest per-file entry behind it. */
+    private static Set<String> listingPaths(FileList listing) {
+        Set<String> paths = new HashSet<>(listing.fileCount());
+        for (int i = 0; i < listing.fileCount(); i++) {
+            paths.add(listing.path(i).toString());
+        }
+        return paths;
+    }
+
     private static boolean listingPathsAreDistinct(FileList listing) {
         Set<String> unique = new HashSet<>(listing.fileCount());
         for (int i = 0; i < listing.fileCount(); i++) {

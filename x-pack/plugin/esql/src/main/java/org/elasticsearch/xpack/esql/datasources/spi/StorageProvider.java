@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.esql.datasources.spi;
 
+import org.elasticsearch.xpack.esql.datasources.StorageEntry;
 import org.elasticsearch.xpack.esql.datasources.StorageIterator;
 
 import java.io.Closeable;
@@ -57,34 +58,24 @@ public interface StorageProvider extends Closeable {
     boolean exists(StoragePath path) throws IOException;
 
     /**
-     * Asks storage whether this provider's credentials can read the object now, and what its length and
-     * last-modified are. The answer must come from storage on this call, never from cached state: callers use it
-     * to decide whether facts already derived from the object may be served.
+     * Asks storage whether this provider's credentials can read the object now, returning what a listing would
+     * have reported for it. The answer must come from storage on this call, never from cached state: callers use
+     * it to decide whether facts already derived from the object may be served.
      *
-     * <p>Not {@link #exists}, which returns neither the length nor the last-modified this answer carries. It does
-     * distinguish a refusal from a missing object — it throws on the first and returns {@code false} only on a
-     * genuine 404 — but a caller that needs the object's version token would have to ask twice.
+     * <p>Throws rather than returning an outcome, because the provider's own {@link ExternalException} already
+     * carries the condition — a refusal and a missing object are distinguishable by {@code condition()} and were
+     * never usefully separated by a return type. Anything else, an outage or a throttle, propagates unchanged:
+     * reporting one as a refusal would turn a transient fault into a permission failure.
      *
-     * <p>Defaulted rather than abstract because there is one correct generic answer, probe by stat; the default
+     * <p>Not {@link #exists}, which returns neither the length nor the last-modified this answer carries, so a
+     * caller needing the object's version token would have to ask twice.
+     *
+     * <p>Defaulted rather than abstract because there is one correct generic answer, probe by stat. The default
      * asks storage and reports what it said. Override only to wrap the call.
      */
-    default ReadOutcome probeRead(StoragePath path) throws IOException {
-        try {
-            StorageObject object = newObject(path);
-            long length = object.length();
-            Instant lastModified = object.lastModified();
-            return new ReadOutcome.Readable(length, lastModified == null ? Instant.EPOCH : lastModified);
-        } catch (ExternalException e) {
-            // Anything else — an outage, a throttle, a clock skew — is not an answer to the question asked, so it
-            // propagates. Reporting one as Denied would turn a transient fault into a permission failure.
-            if (e.condition() == ExternalException.Condition.OBJECT_NOT_FOUND) {
-                return new ReadOutcome.Absent(e);
-            }
-            if (e.condition() == ExternalException.Condition.ACCESS_DENIED) {
-                return new ReadOutcome.Denied(e);
-            }
-            throw e;
-        }
+    default StorageEntry probeRead(StoragePath path) throws IOException {
+        StorageObject object = newObject(path);
+        return new StorageEntry(path, object.length(), object.lastModified());
     }
 
     /** Returns the URI schemes this provider handles (e.g., ["http", "https"]). */

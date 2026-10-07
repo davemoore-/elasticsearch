@@ -78,11 +78,6 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
         );
     }
 
-    /**
-     * The glob rail cannot prove read access per file on every query — a ten-thousand-file listing makes that
-     * unaffordable — so the window in which its derived facts may be served is bounded by time instead. Past
-     * the window the entry is not served, however valid the facts themselves still are.
-     */
     /** The third gate: the dataset aggregate is the glob rail's warm answer, so the window covers it too. */
     public void testDatasetAggregateIsNotServedPastTheTtl() throws Exception {
         Settings settings = Settings.builder()
@@ -106,17 +101,26 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
             .build();
         try (ExternalSourceCacheService service = new ExternalSourceCacheService(settings)) {
             SchemaCacheKey key = SchemaCacheKey.build("s3://bucket/data/file.parquet", 1000L, ".parquet", "", Map.of());
-            service.putSchema(key, agedBy(testSchemaEntry(), TimeValue.timeValueMinutes(21).millis()));
-            assertNull("outside the configured window", service.getSchemaIfPresent(key));
+            SchemaCacheEntry aged = agedBy(testSchemaEntry(), TimeValue.timeValueMinutes(21).millis());
 
+            // Widen first: the same entry that the configured window would reject is served under a wider one,
+            // which is the runtime change taking effect. Asserted in this order because a rejection also evicts,
+            // so a narrow-then-widen sequence would be asking an evicted entry to come back.
             service.setSchemaTtl(TimeValue.timeValueHours(24));
+            service.putSchema(key, aged);
             assertNotNull("a widened window applies without a restart", service.getSchemaIfPresent(key));
 
             service.setSchemaTtl(TimeValue.timeValueMinutes(20));
             assertNull("and a narrowed one applies too", service.getSchemaIfPresent(key));
+            assertEquals("a rejected entry is evicted, not left resident", 0, service.usageStats().get("schema_cache.count"));
         }
     }
 
+    /**
+     * The glob rail cannot prove read access per file on every query — a ten-thousand-file listing makes that
+     * unaffordable — so the window in which its derived facts may be served is bounded by time instead. Past
+     * the window the entry is not served, however valid the facts themselves still are.
+     */
     public void testSchemaIsNotServedPastTheTtl() throws Exception {
         Settings settings = Settings.builder()
             .put("esql.external.cache.size", "10mb")
@@ -2246,9 +2250,10 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
     /**
      * B1: {@code esql.source.cache.schema.ttl} shipped in released versions, so it must stay REGISTERED — a
      * node carrying it in {@code elasticsearch.yml} would fail startup on an unregistered setting. It is now
-     * a deprecated no-op: wired to nothing, ignored. Unlike the other pre-rename {@code esql.source.cache.*}
-     * keys (covered by {@link #testRenamedCacheKeysResolveThroughDeprecatedOldKeys}), it has no
-     * {@code esql.external.cache.*} counterpart to fall back to — renaming a no-op would be pointless.
+     * a deprecated no-op: wired to nothing, ignored. It now has an {@code esql.external.cache.*} counterpart,
+     * {@code esql.external.cache.schema.ttl}, which deliberately does NOT inherit this key's value the way the
+     * other pre-rename keys do (see {@link #testRenamedCacheKeysResolveThroughDeprecatedOldKeys}): this one
+     * shipped documented as ignored, so a cluster may carry a value for it that nobody expects to be live.
      */
     public void testDeprecatedSchemaTtlSettingStaysRegisteredAndInert() throws Exception {
         assertTrue(
