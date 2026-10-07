@@ -9094,12 +9094,28 @@ public class ExternalSourceResolverTests extends ESTestCase {
             this.condition = condition;
         }
 
+        /**
+         * Denies at BOTH accessors, deliberately. {@code StorageProvider#probeRead} reads {@code length()} before
+         * {@code lastModified()}, so a double that only refused the second would be exercising the probe's second
+         * failure point while production fails at its first — and the test would pass on argument evaluation order
+         * rather than on the behaviour it names.
+         */
+        @Override
+        public long length() {
+            refuseIfRevoked();
+            return super.length();
+        }
+
         @Override
         public Instant lastModified() {
+            refuseIfRevoked();
+            return super.lastModified();
+        }
+
+        private void refuseIfRevoked() {
             if (readRevoked.get()) {
                 throw new ExternalClientException(condition, path(), "", "");
             }
-            return super.lastModified();
         }
     }
 

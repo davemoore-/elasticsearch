@@ -658,9 +658,11 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
 
     private void fetchMetadata() throws IOException {
         try {
-            // Suffix range: bytes=-1 returns the last byte + Content-Range with total size.
-            // Avoids a separate HEAD request for file size discovery.
-            GetObjectRequest.Builder request = GetObjectRequest.builder().bucket(bucket).key(key).range("bytes=-1");
+            // First byte, not the last: bytes=0-0 carries the same Content-Range total, and a suffix range is
+            // the more expensive of the two to serve. Either way this avoids a separate HEAD for size discovery,
+            // and it is also the request that establishes the caller may read the object at all — a range GET
+            // needs s3:GetObject, where a listing needs only s3:ListBucket.
+            GetObjectRequest.Builder request = GetObjectRequest.builder().bucket(bucket).key(key).range("bytes=0-0");
             try (var response = getObject(request)) {
                 // Drain the 1-byte body so the HTTP connection returns to the pool
                 // instead of being aborted on close.
@@ -688,10 +690,10 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
                 cachedExists = true;
                 cachedLength = 0L;
             } else if (e.statusCode() == 403) {
-                // GET denied — try the existing bytes=0-0 fallback which extracts
-                // size from Content-Range; HEAD uses the same s3:GetObject permission
-                // so would also be denied.
-                fetchMetadataViaRangeGet();
+                // Denied, and there is nothing cheaper left to try: the fallback range GET is now the same
+                // request, and a HEAD needs the same s3:GetObject so would be refused too. Surface it rather
+                // than spending a second request to be told the same thing.
+                throw throwReadFailure("Failed to read object metadata for", e);
             } else {
                 fetchMetadataViaHead();
             }
