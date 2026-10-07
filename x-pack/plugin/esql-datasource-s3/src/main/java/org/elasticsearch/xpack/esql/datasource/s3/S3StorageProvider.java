@@ -32,6 +32,7 @@ import software.amazon.awssdk.services.s3.model.CommonPrefix;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadBucketRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
@@ -54,6 +55,7 @@ import org.elasticsearch.xpack.esql.datasource.nettycommons.PooledRecvByteBufAll
 import org.elasticsearch.xpack.esql.datasources.ExternalSourceSettings;
 import org.elasticsearch.xpack.esql.datasources.StorageEntry;
 import org.elasticsearch.xpack.esql.datasources.StorageIterator;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalClientException;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalCredentialsExpiredException;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalException.Condition;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalPlanningIo;
@@ -874,6 +876,62 @@ public class S3StorageProvider implements StorageProvider {
         DiscoveredClients dc = discoveredClients;
         S3Client initialClient = dc != null ? dc.sync() : s3Client;
         return existsWithClient(initialClient, bucket, key, path, true);
+    }
+
+    /**
+     * Establishes that these credentials may read the object, and reports its length and last-modified.
+     *
+     * <p>A {@code HeadObject}, which transfers no body. {@code HeadObject} is authorized as
+     * {@code s3:GetObject}, so a refusal here is a refusal to read — the distinction callers depend on, since a
+     * listing needs only {@code s3:ListBucket}. Nothing cheaper exists: every way of learning an object's size on
+     * S3 requires the read permission.
+     *
+     * <p>Overrides the stat-based default so the probe does not go through {@link S3StorageObject}, whose
+     * metadata path deliberately uses a one-byte range GET — that is an optimisation for the read path, where
+     * {@code exists()} and {@code length()} on one object then cost a single request. The probe needs neither the
+     * byte nor the ETag generation pin a GET establishes, so it pays for neither.
+     *
+     * <p>A 403 is final. The range-GET fallback that {@code exists()} uses needs the same permission and would be
+     * refused identically, so retrying only spends a request to be told the same thing.
+     */
+    @Override
+    public StorageEntry probeRead(StoragePath path) throws IOException {
+        validateS3Scheme(path);
+        String bucket = path.host();
+        String key = extractKey(path);
+        DiscoveredClients dc = discoveredClients;
+        S3Client initialClient = dc != null ? dc.sync() : s3Client;
+        return probeReadWithClient(initialClient, bucket, key, path, true);
+    }
+
+    private StorageEntry probeReadWithClient(S3Client client, String bucket, String key, StoragePath path, boolean allowRegionRetry)
+        throws IOException {
+        try {
+            HeadObjectResponse response = client.headObject(HeadObjectRequest.builder().bucket(bucket).key(key).build());
+            Instant lastModified = response.lastModified() != null ? response.lastModified() : Instant.EPOCH;
+            return new StorageEntry(path, response.contentLength() != null ? response.contentLength() : 0L, lastModified);
+        } catch (NoSuchKeyException e) {
+            throw new ExternalClientException(ExternalClientException.Condition.OBJECT_NOT_FOUND, path, "", "");
+        } catch (Exception e) {
+            ExternalCredentialsExpiredException expired = S3FailureDetail.expired(e, "probing read access");
+            if (expired != null) {
+                throw expired;
+            }
+            if (allowRegionRetry && shouldAttemptRegionRetry() && isAuthorizationHeaderMalformed(e)) {
+                String discoveredRegion = discoverRegionViaHeadBucket(client, bucket);
+                if (discoveredRegion != null) {
+                    return probeReadWithClient(cacheDiscoveredClients(discoveredRegion).sync(), bucket, key, path, false);
+                }
+            }
+            if (e instanceof S3Exception s3e && s3e.statusCode() == 403) {
+                throw new ExternalClientException(ExternalClientException.Condition.ACCESS_DENIED, path, "", "");
+            }
+            ExternalUnavailableException unavailable = mapResolveFailure(path, e);
+            if (unavailable != null) {
+                throw unavailable;
+            }
+            throw new IOException("Failed to probe read access for external object: " + S3FailureDetail.of(e) + credentialHint(), e);
+        }
     }
 
     private boolean existsWithClient(S3Client client, String bucket, String key, StoragePath path, boolean allowRegionRetry)
