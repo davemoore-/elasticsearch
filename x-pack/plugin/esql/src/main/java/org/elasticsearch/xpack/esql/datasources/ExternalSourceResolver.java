@@ -1203,10 +1203,10 @@ public class ExternalSourceResolver {
             StorageEntry storageEntry;
             SourceStatistics harvestedStatistics = null;
             if (isCacheable(provider)) {
-                // One live object probe per resolve, warm or cold (fileMetadataOf). The address says which
-                // credential asked and over which bytes, never whether that credential may still read them, so
-                // only storage answers that. mtime is the cache key's version token; length + mtime rebuild the
-                // singleton FileList.
+                // One live object probe per file-metadata window, not per resolve (fileMetadataOf). The address
+                // says which credential asked and over which bytes, never whether that credential may still read
+                // them, so only storage answers that -- and the window is how long an answer stands in for asking.
+                // mtime is the cache key's version token; length + mtime rebuild the singleton FileList.
                 FileMetadata meta = fileMetadataOf(storagePath, provider, storageIdentity);
                 SchemaCacheKey schemaKey = SchemaCacheKey.build(
                     storagePath.toString(),
@@ -2115,8 +2115,9 @@ public class ExternalSourceResolver {
      * {@link #resolveSingleFileSource} and strict {@link #resolveStrictSingleFile}). The mtime is the version token
      * that rebuilds the {@link SchemaCacheKey}; length + mtime rebuild the singleton {@code StorageEntry}.
      * <p>
-     * Probed once per resolve, never cached: entitlement can be withdrawn at the store without any component of
-     * any cache key moving, so a remembered answer proves nothing about this query.
+     * Served from the file-metadata cache within its window and probed from storage otherwise. Entitlement can
+     * be withdrawn at the store without any component of any cache key moving, so a remembered answer proves
+     * nothing about this query; what bounds that is the cache's own clock, which it shares with the listing.
      * <p>
      * The caches take no proof and cannot check for one. What closes this rail is that their key cannot be built
      * without the mtime returned here — a call site obtaining an mtime another way would bypass it.
@@ -2518,7 +2519,7 @@ public class ExternalSourceResolver {
             //
             // The figures folded here come from cached per-file statistics rather than from a read, so this
             // put starts a fresh window on facts an earlier query proved: a count can outlive the last proof
-            // of the rows in it by up to twice the window. That is the glob rail's bound being loose, not a
+            // of the rows in it by the schema window plus the listing one. That is the glob rail's bound being loose, not a
             // second hole — the facts folded were themselves within a window — and tightening it needs the
             // contributions' own proof times, which nothing records.
             if (prefetch.prefetched() == null) {
@@ -4673,9 +4674,9 @@ public class ExternalSourceResolver {
         DatasetMapping declaredMapping,
         String sourceType
     ) throws Exception {
-        // One live object probe per resolve, warm or cold, as on the inferred rail. Strict resolution reads no file
-        // body, so length + mtime are the only per-query object metadata it needs — and the probe that supplies them
-        // is also what proves this query may read the object before its cached physical schema is consulted.
+        // Length and mtime from the file-metadata cache, or a probe past its window, as on the inferred rail.
+        // Strict resolution reads no file body, so they are the only per-query object metadata it needs -- and the
+        // probe behind them is also what proves this query may read the object, within that window.
         FileMetadata meta = fileMetadataOf(storagePath, provider, storageIdentity);
         StorageEntry storageEntry = new StorageEntry(storagePath, meta.length(), Instant.ofEpochMilli(meta.mtimeMillis()));
         FileList singletonList = GlobExpander.detectedFileListOf(List.of(storageEntry), path, PartitionConfig.fromConfig(config));

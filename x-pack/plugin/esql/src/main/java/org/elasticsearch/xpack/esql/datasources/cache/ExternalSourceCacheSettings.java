@@ -98,8 +98,8 @@ public final class ExternalSourceCacheSettings {
     // long they may serve, which is a different question from whether their inputs moved.
     // Default is five minutes after write (the deprecated key's default; this key falls back to it). A file
     // added or removed becomes visible on the next query once that elapses. Lower the setting for faster
-    // visibility. Re-lists stay query-triggered. File length and mtime are no longer cached at all — they come
-    // from the per-resolve probe — so they are not bounded by this or any other clock.
+    // visibility. Re-lists stay query-triggered. A file's length and mtime are cached under this same clock, so
+    // this is also how long a single-file resolve can answer without asking the store anything.
     public static final Setting<TimeValue> LISTING_TTL = Setting.positiveTimeSetting(
         "esql.external.cache.listing.ttl",
         LISTING_TTL_OLD,
@@ -112,7 +112,7 @@ public final class ExternalSourceCacheSettings {
      * freshness bound — the identity keys already miss when a file moves — but a bound on entitlement being
      * withdrawn at the store while every component of the key stays fixed.
      * <p>
-     * Only the glob read path *needs* it — a single-file read probes storage every query, while proving read on
+     * Only the glob read path *needs* it — a single-file read asks the store once per {@link #LISTING_TTL}, while proving read on
      * each file of a large listing every query does not scale, so re-deriving is the only moment access is
      * re-checked there. A re-derive is not guaranteed to reach the store: it reads the file's footer, and
      * {@link #FOOTER_CACHE_TTL} bounds a footer at two of its own periods past the read behind it, because the
