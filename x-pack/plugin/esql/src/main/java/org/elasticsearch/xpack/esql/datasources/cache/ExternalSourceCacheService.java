@@ -48,17 +48,19 @@ import java.util.function.LongFunction;
 /**
  * Coordinator-only, in-memory cache service for external source metadata. Maintains five independent caches, one per kind of fact:
  * <ul>
- *   <li>Per-file schema cache (~8% of budget) — keyed by {@code (dataset identity, path, mtime,
+ *   <li>Per-file schema cache (~16% of budget) — keyed by {@code (dataset identity, path, mtime,
  *       declaredStrict)}. One kind of record: what the file contains. No measurement, and one entry per file.
- *       A changed file has a new mtime, hence a new key; the clock on top of that bounds how long a
- *       record stands as proof that the credential addressing it could read the object.</li>
- *   <li>Statistics cache (~12% of budget) — what ONE read measured about one file, keyed by the file's own
+ *       No time expiry: a changed file has a new mtime, hence a new key.</li>
+ *   <li>Statistics cache (~17% of budget) — what ONE read measured about one file, keyed by the file's own
  *       address plus the read that measured it, so one entry per file per read configuration. Its own slice,
  *       so the measurements cannot evict the schema records they were measured against. The larger of the two
  *       because a harvested {@code _stats.*} map outweighs the schema it was measured against.</li>
  *   <li>Dataset-aggregate cache (~2% of budget) — the memoized whole-dataset row count, keyed by the
- *       file-set fingerprint. Kept separate so per-file churn cannot evict it.</li>
- *   <li>Listing cache (~78% of budget, five minutes by default) — the file set under a prefix, isolated by
+ *       file-set fingerprint. No time expiry; kept separate so per-file churn cannot evict it.</li>
+ *   <li>File-metadata cache (count-bounded, listing TTL, five minutes by default) — {@code {length, mtime}}
+ *       per path, so a repeated resolve skips the stat. Like listing it is freshness-discovery (it holds the
+ *       CURRENT mtime, which gates the identity-keyed caches above), so it keeps that TTL.</li>
+ *   <li>Listing cache (~65% of budget, five minutes by default) — the file set under a prefix, isolated by
  *       credential hash. Discovers file identity and has no per-file key to invalidate on, hence the TTL.</li>
  * </ul>
  * The identity-keyed caches (schema, dataset-aggregate) are bounded by weight + LRU, and by a clock set from
@@ -190,19 +192,20 @@ public class ExternalSourceCacheService implements Closeable {
         TimeValue schemaTtlSetting = ExternalSourceCacheSettings.SCHEMA_TTL.get(settings);
         TimeValue schemaTtl = schemaTtlSetting.millis() == 0 ? null : schemaTtlSetting;
 
-        // Per-file schema stays at its established 20%; the dataset-aggregate cache gets a small dedicated
-        // slice carved from listing (each dataset entry is a single row count — kilobytes suffice — so its
-        // exact size barely matters; what matters is that it is ITS OWN slice, immune to per-file churn).
-        // The identity caches take 20% between them, as before, now split by kind of fact. Statistics get the
-        // larger share: for a text file with harvested extrema the _stats.* map outweighs the schema it was
-        // measured against, several stat keys per column against one column name.
-        // The identity slices still total a fifth between them; statistics take the remainder so the two sum
-        // exactly, rather than each flooring its own percentage and losing a byte.
-        long identityBudget = maxTotalBytes / 5;             // 20%, as before the split
-        long schemaBudget = identityBudget * 2 / 5;          // 8% of the total
-        long statisticsBudget = identityBudget - schemaBudget; // 12% of the total, and the exact remainder
-        long datasetAggregateBudget = maxTotalBytes / 50;    // 2%
-        long listingBudget = maxTotalBytes - schemaBudget - statisticsBudget - datasetAggregateBudget; // ~78%
+        // The statistics store is a NEW consumer, not a share of an existing one. Before the split those
+        // bytes sat inside the schema record and were charged to the schema slice — but a COLD record never
+        // carried SCAN-DERIVED ones (a columnar file's footer statistics do ride its schema record), and the fan-out admission gate
+        // (SchemaFanOutAdmission#tryAdmit) sizes a glob against
+        // the schema budget using exactly that cold record. So funding statistics out of the schema slice
+        // halves how many files a dataset may have before NOTHING is cached for it, and the "entries are
+        // smaller now" argument buys nothing at admission time. Each store therefore keeps the absolute
+        // budget it had, and CACHE_SIZE grew by the new consumer instead: at every heap size the schema,
+        // statistics, dataset-aggregate and listing slices are all at least as large as before the split,
+        // equal to within integer truncation (two totals floor independently, so schema can land one byte under).
+        long schemaBudget = maxTotalBytes * 4 / 25;          // 16%: the same ABSOLUTE slice as before the split
+        long statisticsBudget = maxTotalBytes * 17 / 100;    // 17%: the heavier half, as the measurements are
+        long datasetAggregateBudget = maxTotalBytes / 50;    // 2%: one row count per dataset, its own slice
+        long listingBudget = maxTotalBytes - schemaBudget - statisticsBudget - datasetAggregateBudget; // 65%
         // Each store refuses a single entry heavier than its own per-entry ceiling, so one oversized harvest
         // cannot admit-then-flush that store's working set. See WeightedStore#perEntryCeiling.
 
@@ -371,7 +374,7 @@ public class ExternalSourceCacheService implements Closeable {
         putSchemaIfWithinCeiling(key, entry);
     }
 
-    /** Byte budget of the per-file schema cache (one fifth of the external cache). */
+    /** Byte budget of the per-file schema cache (four twenty-fifths of the external cache). */
     public long schemaBudget() {
         return schemaStore.budgetBytes();
     }
