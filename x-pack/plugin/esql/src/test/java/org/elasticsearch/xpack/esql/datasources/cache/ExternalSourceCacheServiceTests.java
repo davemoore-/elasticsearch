@@ -74,6 +74,15 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
             .build();
     }
 
+    /** The dataset aggregate expires on the listing clock, not the schema one. */
+    private static Settings withListingTtl(String ttl) {
+        return Settings.builder()
+            .put("esql.external.cache.size", "10mb")
+            .put("esql.external.cache.enabled", true)
+            .put("esql.external.cache.listing.ttl", ttl)
+            .build();
+    }
+
     /**
      * The glob rail cannot prove read access per file on every query — a ten-thousand-file listing makes that
      * unaffordable — so the window in which its derived facts may be served is bounded by time instead. The
@@ -127,7 +136,7 @@ public class ExternalSourceCacheServiceTests extends ESTestCase {
 
     /** The dataset aggregate is the glob read path's warm answer, so the window covers it as well. */
     public void testDatasetAggregateIsNotServedPastTheWindow() throws Exception {
-        try (ExternalSourceCacheService service = new ExternalSourceCacheService(withSchemaTtl("1ms"))) {
+        try (ExternalSourceCacheService service = new ExternalSourceCacheService(withListingTtl("1ms"))) {
             DatasetAggregateKey key = datasetKey();
             service.putDatasetAggregate(key, 123L);
             assertBusy(() -> assertNull("past the window the aggregate is not served", service.getDatasetAggregate(key)));

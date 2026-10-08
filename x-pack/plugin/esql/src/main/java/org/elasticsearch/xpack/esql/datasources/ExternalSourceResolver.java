@@ -33,6 +33,7 @@ import org.elasticsearch.xpack.esql.datasources.cache.DatasetIdentity;
 import org.elasticsearch.xpack.esql.datasources.cache.ExternalSourceCacheService;
 import org.elasticsearch.xpack.esql.datasources.cache.ExternalStats;
 import org.elasticsearch.xpack.esql.datasources.cache.FileMetadata;
+import org.elasticsearch.xpack.esql.datasources.cache.FileMetadataCacheKey;
 import org.elasticsearch.xpack.esql.datasources.cache.ListingCacheKey;
 import org.elasticsearch.xpack.esql.datasources.cache.ReadConfigFingerprint;
 import org.elasticsearch.xpack.esql.datasources.cache.SchemaCacheEntry;
@@ -1206,7 +1207,7 @@ public class ExternalSourceResolver {
                 // credential asked and over which bytes, never whether that credential may still read them, so
                 // only storage answers that. mtime is the cache key's version token; length + mtime rebuild the
                 // singleton FileList.
-                FileMetadata meta = fileMetadataOf(storagePath, provider);
+                FileMetadata meta = fileMetadataOf(storagePath, provider, storageIdentity);
                 SchemaCacheKey schemaKey = SchemaCacheKey.build(
                     storagePath.toString(),
                     meta.mtimeMillis(),
@@ -2120,7 +2121,20 @@ public class ExternalSourceResolver {
      * The caches take no proof and cannot check for one. What closes this rail is that their key cannot be built
      * without the mtime returned here — a call site obtaining an mtime another way would bypass it.
      */
-    private FileMetadata fileMetadataOf(StoragePath storagePath, StorageProvider provider) throws Exception {
+    private FileMetadata fileMetadataOf(StoragePath storagePath, StorageProvider provider, String storageIdentity) throws Exception {
+        if (isCacheable(provider)) {
+            FileMetadataCacheKey metaKey = new FileMetadataCacheKey(storagePath.toString(), storageIdentity);
+            return cacheService.getOrComputeFileMetadata(metaKey, k -> probeRead(storagePath, provider));
+        }
+        return probeRead(storagePath, provider);
+    }
+
+    /**
+     * Asks storage for the object's length and modification time, which is also the only thing that establishes
+     * that this query's credentials can still read it: an address records which credential asked and over which
+     * bytes, never whether that credential may still perform the read.
+     */
+    private static FileMetadata probeRead(StoragePath storagePath, StorageProvider provider) throws Exception {
         StorageEntry probed = provider.probeRead(storagePath);
         return new FileMetadata(probed.length(), probed.lastModified().toEpochMilli());
     }
@@ -4662,7 +4676,7 @@ public class ExternalSourceResolver {
         // One live object probe per resolve, warm or cold, as on the inferred rail. Strict resolution reads no file
         // body, so length + mtime are the only per-query object metadata it needs — and the probe that supplies them
         // is also what proves this query may read the object before its cached physical schema is consulted.
-        FileMetadata meta = fileMetadataOf(storagePath, provider);
+        FileMetadata meta = fileMetadataOf(storagePath, provider, storageIdentity);
         StorageEntry storageEntry = new StorageEntry(storagePath, meta.length(), Instant.ofEpochMilli(meta.mtimeMillis()));
         FileList singletonList = GlobExpander.detectedFileListOf(List.of(storageEntry), path, PartitionConfig.fromConfig(config));
         pendingListingWarnings.addAll(singletonList.listingWarnings());

@@ -6902,7 +6902,9 @@ public class ExternalSourceResolverTests extends ESTestCase {
         Settings settings = Settings.builder()
             .put("esql.external.cache.size", "10mb")
             .put("esql.external.cache.enabled", true)
-            .put("esql.external.cache.listing.ttl", "30s")
+            // The file-metadata cache shares the listing clock, so a window this short puts every
+            // resolve past it -- which is the state these assertions are about.
+            .put("esql.external.cache.listing.ttl", "1ms")
             .build();
 
         try (ExternalSourceCacheService cacheService = new ExternalSourceCacheService(settings)) {
@@ -6914,6 +6916,7 @@ public class ExternalSourceResolverTests extends ESTestCase {
             assertEquals("cold resolve probes the object", 1, countingProvider.metadataProbeCount.get());
             assertEquals("the cold resolve is a schema miss", 1L, cacheService.usageStats().get("schema_cache.misses"));
 
+            safeSleep(10);  // Cross the file-metadata window, so this resolve asks storage rather than being answered from it.
             PlainActionFuture<ExternalSourceResolution> f2 = new PlainActionFuture<>();
             resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), f2);
             ExternalSourceResolution res2 = f2.actionGet();
@@ -6945,13 +6948,16 @@ public class ExternalSourceResolverTests extends ESTestCase {
         Settings settings = Settings.builder()
             .put("esql.external.cache.size", "10mb")
             .put("esql.external.cache.enabled", true)
-            .put("esql.external.cache.listing.ttl", "30s")
+            // The file-metadata cache shares the listing clock, so a window this short puts every
+            // resolve past it -- which is the state these assertions are about.
+            .put("esql.external.cache.listing.ttl", "1ms")
             .build();
 
         try (ExternalSourceCacheService cacheService = new ExternalSourceCacheService(settings)) {
             ExternalSourceResolver resolver = createResolverWithCache(provider, schemasByPath, cacheService);
 
             for (int i = 1; i <= 2; i++) {
+                safeSleep(10);  // Cross the file-metadata window, so this resolve asks storage rather than being answered from it.
                 PlainActionFuture<ExternalSourceResolution> f = new PlainActionFuture<>();
                 resolver.resolve(List.of(file), Map.of(file, new HashMap<>()), null, Map.of(file, mapping), null, f);
                 assertNotNull(f.actionGet().resolvedSource(file));
@@ -6997,7 +7003,13 @@ public class ExternalSourceResolverTests extends ESTestCase {
 
         RevocableStorageProvider provider = new RevocableStorageProvider(schemasByPath, Condition.STORE_UNAVAILABLE);
 
-        Settings settings = Settings.builder().put("esql.external.cache.size", "10mb").put("esql.external.cache.enabled", true).build();
+        Settings settings = Settings.builder()
+            .put("esql.external.cache.size", "10mb")
+            .put("esql.external.cache.enabled", true)
+            // The file-metadata cache shares the listing clock, so a window this short puts every
+            // resolve past it -- which is the state these assertions are about.
+            .put("esql.external.cache.listing.ttl", "1ms")
+            .build();
 
         try (ExternalSourceCacheService cacheService = new ExternalSourceCacheService(settings)) {
             ExternalSourceResolver resolver = createResolverWithCache(provider, schemasByPath, cacheService);
@@ -7008,6 +7020,7 @@ public class ExternalSourceResolverTests extends ESTestCase {
 
             provider.readRevoked.set(true);
 
+            safeSleep(10);  // Cross the file-metadata window, so this resolve asks storage rather than being answered from it.
             PlainActionFuture<ExternalSourceResolution> warm = new PlainActionFuture<>();
             resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), warm);
             Exception e = expectThrows(Exception.class, warm::actionGet);
@@ -7034,7 +7047,9 @@ public class ExternalSourceResolverTests extends ESTestCase {
         Settings settings = Settings.builder()
             .put("esql.external.cache.size", "10mb")
             .put("esql.external.cache.enabled", true)
-            .put("esql.external.cache.listing.ttl", "30s")
+            // The file-metadata cache shares the listing clock, so a window this short puts every
+            // resolve past it -- which is the state these assertions are about.
+            .put("esql.external.cache.listing.ttl", "1ms")
             .build();
 
         try (ExternalSourceCacheService cacheService = new ExternalSourceCacheService(settings)) {
@@ -7049,6 +7064,7 @@ public class ExternalSourceResolverTests extends ESTestCase {
             // itself is untouched, so no component of any cache key moves.
             provider.readRevoked.set(true);
 
+            safeSleep(10);  // Cross the file-metadata window, so this resolve asks storage rather than being answered from it.
             PlainActionFuture<ExternalSourceResolution> warm = new PlainActionFuture<>();
             resolver.resolve(List.of("s3://bucket/data/single.parquet"), Map.of(), warm);
             ExternalClientException denied = expectThrows(ExternalClientException.class, warm::actionGet);

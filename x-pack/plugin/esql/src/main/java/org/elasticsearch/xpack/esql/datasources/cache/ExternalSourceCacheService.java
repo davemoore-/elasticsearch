@@ -50,7 +50,8 @@ import java.util.function.LongFunction;
  * <ul>
  *   <li>Per-file schema cache (~8% of budget) — keyed by {@code (dataset identity, path, mtime,
  *       declaredStrict)}. One kind of record: what the file contains. No measurement, and one entry per file.
- *       No time expiry: a changed file has a new mtime, hence a new key.</li>
+ *       A changed file has a new mtime, hence a new key; the clock on top of that bounds how long a
+ *       record stands as proof that the credential addressing it could read the object.</li>
  *   <li>Statistics cache (~12% of budget) — what ONE read measured about one file, keyed by the file's own
  *       address plus the read that measured it, so one entry per file per read configuration. Its own slice,
  *       so the measurements cannot evict the schema records they were measured against. The larger of the two
@@ -83,10 +84,12 @@ public class ExternalSourceCacheService implements Closeable {
     /**
      * The memoized whole-dataset row-count aggregate, keyed by file-set fingerprint. Tiny per entry but
      * expensive to rebuild (a full cold scan), so it gets its OWN cache: sharing the per-file budget let
-     * per-file churn evict it and the warm dataset {@code COUNT} decayed mid-use. No time expiry — the
-     * fingerprint is a correct-or-miss identity key; only weight/LRU reclaims it.
+     * per-file churn evict it and the warm dataset {@code COUNT} decayed mid-use. The fingerprint is a
+     * correct-or-miss identity key, so the clock it carries is not for freshness; it bounds how long the count
+     * stands without the store being asked again.
      */
     private final WeightedStore<DatasetAggregateKey, DatasetAggregate> datasetAggregateStore;
+    private final Cache<FileMetadataCacheKey, FileMetadata> fileMetadataCache;
     private final WeightedStore<ListingCacheKey, FileList> listingStore;
     /** In-flight async listings: concurrent cold misses for the same key share one compute. */
     private final ConcurrentHashMap<ListingCacheKey, SubscribableListener<FileList>> inFlightListings = new ConcurrentHashMap<>();
@@ -160,6 +163,7 @@ public class ExternalSourceCacheService implements Closeable {
      * public setting is a permanent support surface — it can be promoted to a setting later if a real need
      * appears.
      */
+    private static final int FILE_METADATA_CACHE_MAX_ENTRIES = 100_000;
     private final LinkedHashMap<DatasetAggregateKey, PendingDatasetAggregate> pendingDatasetAggregates = new LinkedHashMap<>();
 
     /**
@@ -223,12 +227,26 @@ public class ExternalSourceCacheService implements Closeable {
 
         // A constant weigher: the value is one long behind a header, so this store's weight is its entry count
         // times DATASET_AGGREGATE_BYTES and nothing is walked per promote.
+        // The aggregate expires on the LISTING clock, not the schema one. It is keyed by that listing's
+        // file-set fingerprint, so the listing is the only clock the system already re-validates against, and
+        // one row count folded from facts proven across a whole schema window should not then stand for a
+        // second schema window of its own.
         this.datasetAggregateStore = WeightedStore.of(
             "dataset_aggregate_cache",
             datasetAggregateBudget,
             value -> DATASET_AGGREGATE_BYTES,
-            schemaTtl
+            listingTtl
         );
+
+        // Freshness discovery, like the listing: it holds a file's CURRENT length and mtime, the version token
+        // the identity keys are rebuilt from, so it refreshes on a clock and shares the listing's. It is also
+        // what bounds the single-file rails: a resolve is answered from here without asking storage, so the
+        // longest a withdrawn read permission goes unnoticed there is one of these periods. No byte weigher --
+        // entries are tiny and fixed-size, so a generous entry count bounds it instead of the byte budget.
+        this.fileMetadataCache = CacheBuilder.<FileMetadataCacheKey, FileMetadata>builder()
+            .setMaximumWeight(FILE_METADATA_CACHE_MAX_ENTRIES)
+            .setExpireAfterWrite(listingTtl)
+            .build();
 
         this.listingStore = WeightedStore.of("listing_cache", listingBudget, FileList::estimatedBytes, listingTtl);
 
@@ -311,6 +329,20 @@ public class ExternalSourceCacheService implements Closeable {
             }
             throw e;
         }
+    }
+
+    /**
+     * Returns the cached {@code {length, mtime}} for a path, or computes it through the loader on a miss. The
+     * loader asks storage, which is also what proves the asking credential may still read the object, so an
+     * entry's residency here is how long that proof stands: see the clock in the constructor. With the cache
+     * disabled the loader runs every time, so the probe is not skipped.
+     */
+    public FileMetadata getOrComputeFileMetadata(FileMetadataCacheKey key, CacheLoader<FileMetadataCacheKey, FileMetadata> loader)
+        throws Exception {
+        if (enabled == false) {
+            return loader.load(key);
+        }
+        return fileMetadataCache.computeIfAbsent(key, loader);
     }
 
     /**
@@ -1837,6 +1869,7 @@ public class ExternalSourceCacheService implements Closeable {
         schemaStore.invalidateAll();
         statisticsStore.invalidateAll();
         datasetAggregateStore.invalidateAll();
+        fileMetadataCache.invalidateAll();
         listingStore.invalidateAll();
         inFlightListings.clear();
         synchronized (pendingDatasetAggregates) {
@@ -1862,6 +1895,12 @@ public class ExternalSourceCacheService implements Closeable {
 
         schemaStore.reportInto(stats);
         statisticsStore.reportInto(stats);
+
+        stats.put("file_metadata_cache.count", fileMetadataCache.count());
+        stats.put("file_metadata_cache.weight_bytes", fileMetadataCache.weight());
+        stats.put("file_metadata_cache.hits", fileMetadataCache.stats().getHits());
+        stats.put("file_metadata_cache.misses", fileMetadataCache.stats().getMisses());
+        stats.put("file_metadata_cache.evictions", fileMetadataCache.stats().getEvictions());
 
         listingStore.reportInto(stats);
 
@@ -1895,6 +1934,11 @@ public class ExternalSourceCacheService implements Closeable {
     // Visible for testing
     Cache<StatisticsKey, StatisticsRecord> statisticsCache() {
         return statisticsStore.cache();
+    }
+
+    // Visible for testing
+    Cache<FileMetadataCacheKey, FileMetadata> fileMetadataCache() {
+        return fileMetadataCache;
     }
 
     // Visible for testing
