@@ -185,8 +185,8 @@ public final class DatasetIdentity {
      * It must compare participants and NOT the whole identity. The components this leaves out - the definition
      * version and the secret digest - were outside the compared value before this type existed, so widening the
      * comparison to the whole identity makes two entries over one file that differ only in one of those refuse
-     * each other, and then NEITHER is enriched while both live. The schema store has no clock, so that is not a
-     * cold read each: it is a warm path that stays dead. Two datasets over one file differing only in their
+     * each other, and then NEITHER is enriched while both live, which costs a re-derivation per entry per
+     * schema-TTL window rather than once. Two datasets over one file differing only in their
      * definition version is an ordinary state, and so is one file reachable under two credential sets.
      * <p>
      * Whether a contribution should enrich an entry whose definition version it cannot confirm is a separate

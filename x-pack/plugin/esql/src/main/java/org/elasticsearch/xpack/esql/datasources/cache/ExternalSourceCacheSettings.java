@@ -17,8 +17,8 @@ import java.util.List;
 
 /**
  * Cluster settings for ESQL external source caching.
- * Everything here is restart-only (NodeScope) except the enabled flag and the schema TTL, both of
- * which are dynamic and wired to live consumers in {@code EsqlPlugin.createComponents}. A setting must not be declared Dynamic unless a
+ * Everything here is restart-only (NodeScope) except the enabled flag, which is dynamic and wired to a
+ * live consumer in {@code EsqlPlugin.createComponents}. A setting must not be declared Dynamic unless a
  * {@code ClusterSettings.addSettingsUpdateConsumer} actually observes updates — a Dynamic flag without a
  * consumer accepts runtime updates and silently ignores them.
  */

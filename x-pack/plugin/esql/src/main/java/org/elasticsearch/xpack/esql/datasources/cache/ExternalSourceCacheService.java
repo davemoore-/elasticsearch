@@ -205,16 +205,19 @@ public class ExternalSourceCacheService implements Closeable {
         // The schema and dataset-aggregate stores expire on write. Being identity-keyed, a changed input
         // already misses, so the clock is not about freshness: it bounds how long a record stands as proof that
         // the credential in its address could read the object, which no component of an address can express.
-        // Counting from the write is what makes it a bound — Cache#get touches only the access time, so a
-        // steadily queried dataset cannot postpone it, and every write into these two stores follows a read of
-        // the object by the query performing that write.
+        // Counting from the write is what makes it a bound: Cache#get touches only the access time, so a
+        // steadily queried dataset cannot postpone it. Every write into the schema store follows a read of the
+        // object by the query performing it. The dataset aggregate has one write that does not — the per-file
+        // merge's write-through folds cached statistics — so a count there can stand for up to two windows
+        // after the last read behind it.
         //
         // The statistics store takes none, and must not. Measurements are read only alongside a schema record
         // for the same file: either one the resolve has just derived, or one the store still holds, and an
         // expired entry is not held. So the clock above already bounds when they can be served. A clock here
-        // would also be wrong — a contribution is matched to an entry on its participants alone, so one data
-        // source's scan re-puts another's record, and the second credential's window would then be refreshed
-        // by the first credential's reads.
+        // would also be wrong — a contribution is matched on path, mtime and format config, and the secret
+        // digest sits outside the participants a match compares, so one file is reachable under two credential
+        // sets and one data source's scan re-puts the other's record. The second credential's window would
+        // then be refreshed by the first credential's reads.
         this.schemaStore = WeightedStore.of("schema_cache", schemaBudget, SchemaCacheEntry::estimatedBytes, schemaTtl);
         this.statisticsStore = WeightedStore.of("statistics_cache", statisticsBudget, StatisticsRecord::estimatedBytes, null);
 
@@ -368,8 +371,9 @@ public class ExternalSourceCacheService implements Closeable {
         if (enabled == false || key == null) {
             return null;
         }
-        // Cache.get() already promotes the entry to the LRU head, so a hot dataset stays resident; no re-put
-        // is needed (there is no expireAfterWrite clock to refresh — the dataset cache has no TTL).
+        // Cache.get() promotes the entry to the LRU head, so a hot dataset stays resident against eviction. It
+        // does not touch the write time, so this read does not extend the window the store expires on, which is
+        // the point of counting from the write rather than the access.
         DatasetAggregate aggregate = datasetAggregateStore.get(key);
         return aggregate == null ? null : aggregate.asStatistics();
     }
