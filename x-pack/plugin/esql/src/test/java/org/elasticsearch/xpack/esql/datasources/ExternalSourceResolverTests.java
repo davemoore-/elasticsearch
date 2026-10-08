@@ -7039,7 +7039,7 @@ public class ExternalSourceResolverTests extends ESTestCase {
      * unchanged, and the policy behind it has been edited so the object is no longer readable. Nothing on this
      * side moves, so only asking storage detects it — which the resolve now does on every resolve.
      */
-    public void testWarmResolveFailsAfterReadAccessRevoked() throws Exception {
+    public void testAStoreRefusalPastTheMetadataIntervalSurfaces() throws Exception {
         List<Attribute> schema = List.of(attr("id", DataType.INTEGER), attr("name", DataType.KEYWORD));
         Map<String, List<Attribute>> schemasByPath = new HashMap<>();
         schemasByPath.put("s3://bucket/data/single.parquet", schema);

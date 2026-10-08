@@ -535,7 +535,7 @@ public class ExternalErrorSurfaceIT extends ESRestTestCase {
      * before the resolve path probed per query the second count was served from facts the caller could no longer
      * read — and nothing failed, which is the whole defect.
      */
-    public void testWarmCountIsRefusedAfterReadAccessIsWithdrawn() throws IOException {
+    public void testAStoreRefusalPastTheMetadataIntervalReachesTheClient() throws IOException {
         String key = "data/warm_count_denied.csv";
         seed(key, "id,city\n1,Vienna\n2,Graz\n");
         putDataSource("warm_count_ds", staticCredentialSettings());
