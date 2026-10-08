@@ -497,7 +497,6 @@ public class EsqlPlugin extends Plugin implements ActionPlugin, ExtensiblePlugin
         clusterSettings.initializeAndWatchIfRegistered(ExternalSourceSettings.MAX_LISTED_OBJECTS, maxListedObjects::set);
         if (federationRegistered) {
             clusterSettings.addSettingsUpdateConsumer(ExternalSourceCacheSettings.CACHE_ENABLED, cacheService::setEnabled);
-            clusterSettings.addSettingsUpdateConsumer(ExternalSourceCacheSettings.SCHEMA_TTL, cacheService::setSchemaTtl);
         }
         // Built before the module because split discovery lists too: a query whose schema came from a prefix of the
         // dataset lists the rest there, and must do so on the same caps and through the same cache as resolution.

@@ -27,46 +27,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 
-import static org.hamcrest.Matchers.containsString;
-
 public class SchemaCacheEntryTests extends ESTestCase {
-
-    /**
-     * Statistics enrichment re-puts the same key as a query harvests more of a dataset. The inferred-fact window
-     * is measured from this field, so carrying it is what stops the victim's own scans extending the window.
-     */
-    public void testEnrichmentKeepsTheOriginalDerivationTime() {
-        SchemaCacheEntry original = SchemaCacheEntry.from(
-            List.of(new ReferenceAttribute(Source.EMPTY, "id", DataType.LONG)),
-            "parquet",
-            "s3://bucket/f.parquet",
-            Map.of(),
-            Map.of()
-        );
-        SchemaCacheEntry enriched = original.withSafeMetadata(Map.of("k", "v"));
-        assertEquals("enrichment must not restamp the derivation time", original.cachedAtMillis(), enriched.cachedAtMillis());
-    }
-
-    /** An unstamped entry would read as arbitrarily old and become silently unservable, so it is refused. */
-    public void testUnstampedDerivationTimeIsRefused() {
-        IllegalArgumentException e = expectThrows(
-            IllegalArgumentException.class,
-            () -> new SchemaCacheEntry(
-                new String[] { "id" },
-                new DataType[] { DataType.LONG },
-                new Nullability[] { Nullability.TRUE },
-                new boolean[] { false },
-                "parquet",
-                "s3://bucket/f.parquet",
-                Map.of(),
-                Map.of(),
-                0L,
-                List.of(),
-                List.of()
-            )
-        );
-        assertThat(e.getMessage(), containsString("cachedAtMillis"));
-    }
 
     public void testFromSourceMetadataPreservesIdentityFields() {
         List<Attribute> schema = List.of(attr("id", DataType.INTEGER), attr("name", DataType.KEYWORD));
@@ -214,7 +175,7 @@ public class SchemaCacheEntryTests extends ESTestCase {
     }
 
     public void testFromPrimitivesRejectsMismatchedColumnArrays() {
-        // Direct primitive factory: this validation lives in the record's compact constructor.
+        // Direct primitive factory: this validation lives in the constructor.
         IllegalArgumentException ex = expectThrows(
             IllegalArgumentException.class,
             () -> new SchemaCacheEntry(
@@ -226,7 +187,6 @@ public class SchemaCacheEntryTests extends ESTestCase {
                 "p",
                 Map.of(),
                 Map.of(),
-                System.currentTimeMillis(),
                 List.of(),
                 List.of()
             )

@@ -129,8 +129,7 @@ public final class ExternalSourceCacheSettings {
         "esql.external.cache.schema.ttl",
         TimeValue.timeValueMinutes(20),
         TimeValue.timeValueMillis(0),
-        Setting.Property.NodeScope,
-        Setting.Property.Dynamic
+        Setting.Property.NodeScope
     );
 
     /**
