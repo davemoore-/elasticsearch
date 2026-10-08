@@ -1222,8 +1222,8 @@ public class ExternalSourceResolver {
             SourceStatistics harvestedStatistics = null;
             if (isCacheable(provider)) {
                 // One live object probe per file-metadata window, not per resolve (fileMetadataOf). The address
-                // says which credential asked and over which bytes, never whether that credential may still read
-                // them, so only storage answers that -- and the window is how long an answer stands in for asking.
+                // records which read is being asked about, never what the store would answer for it now -- and the
+                // window is how long an earlier answer stands in for asking again.
                 // mtime is the cache key's version token; length + mtime rebuild the singleton FileList.
                 FileMetadata meta = fileMetadataOf(storagePath, provider, storageIdentity);
                 SchemaCacheKey schemaKey = SchemaCacheKey.build(
@@ -2166,12 +2166,12 @@ public class ExternalSourceResolver {
      * {@link #resolveSingleFileSource} and strict {@link #resolveStrictSingleFile}). The mtime is the version token
      * that rebuilds the {@link SchemaCacheKey}; length + mtime rebuild the singleton {@code StorageEntry}.
      * <p>
-     * Served from the file-metadata cache within its window and probed from storage otherwise. Entitlement can
-     * be withdrawn at the store without any component of any cache key moving, so a remembered answer proves
-     * nothing about this query; what bounds that is the cache's own clock, which it shares with the listing.
+     * Served from the file-metadata cache within its window and fetched from storage otherwise. Nothing in a
+     * cache key changes when the store's answer for this object would change, so how long a remembered answer
+     * may stand in for asking again is bounded by that cache's own clock, which it shares with the listing.
      * <p>
-     * The caches take no proof and cannot check for one. What closes this rail is that their key cannot be built
-     * without the mtime returned here — a call site obtaining an mtime another way would bypass it.
+     * The schema key cannot be built without the mtime returned here, so this is the one point on the rail where
+     * the store is consulted — a call site obtaining an mtime another way would bypass it.
      */
     private FileMetadata fileMetadataOf(StoragePath storagePath, StorageProvider provider, String storageIdentity) throws Exception {
         if (isCacheable(provider)) {
@@ -2182,9 +2182,8 @@ public class ExternalSourceResolver {
     }
 
     /**
-     * Asks storage for the object's length and modification time, which is also the only thing that establishes
-     * that this query's credentials can still read it: an address records which credential asked and over which
-     * bytes, never whether that credential may still perform the read.
+     * Asks storage for the object's length and modification time. An address records which read is being asked
+     * about, never what the store would answer for it now, so this is the only point on the rail that finds out.
      */
     private static FileMetadata probeRead(StoragePath storagePath, StorageProvider provider) throws Exception {
         StorageEntry probed = provider.probeRead(storagePath);
@@ -2569,10 +2568,10 @@ public class ExternalSourceResolver {
             // files => same key => same count), repeat warm resolves needn't re-scan paths or re-put.
             //
             // The figures folded here come from cached per-file statistics rather than from a read, so this
-            // put starts a fresh window on facts an earlier query proved: a count can outlive the last proof
-            // of the rows in it by the schema window plus the listing one. That is the glob rail's bound being loose, not a
-            // second hole — the facts folded were themselves within a window — and tightening it needs the
-            // contributions' own proof times, which nothing records.
+            // put starts a fresh window on figures an earlier query derived: a count can outlive the last read
+            // behind its rows by the schema window plus the listing one. The figures folded were themselves inside
+            // a window, so this is the glob rail's bound being loose rather than unbounded; tightening it needs the
+            // contributions' own derivation times, which nothing records.
             if (prefetch.prefetched() == null) {
                 Object rowCount = aggregatedStats.get(SourceStatisticsSerializer.STATS_ROW_COUNT);
                 // Duplicate-path guard on the write-through: a comma-separated list can name the same file

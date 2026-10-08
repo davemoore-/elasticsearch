@@ -109,12 +109,12 @@ public final class ExternalSourceCacheSettings {
 
     /**
      * How long a schema or statistic inferred from a file may be served before it is derived again. Not a
-     * freshness bound — the identity keys already miss when a file moves — but a bound on entitlement being
-     * withdrawn at the store while every component of the key stays fixed.
+     * freshness bound — the identity keys already miss when a file moves — but an upper bound on reuse while
+     * every component of the key stays fixed.
      * <p>
-     * Only the glob read path *needs* it — a single-file read asks the store once per {@link #LISTING_TTL}, while proving read on
-     * each file of a large listing every query does not scale, so re-deriving is the only moment access is
-     * re-checked there. A re-derive is not guaranteed to reach the store: it reads the file's footer, and
+     * Only the glob read path *needs* it — a single-file read asks the store once per {@link #LISTING_TTL}, while
+     * stat-ing each file of a large listing every query does not scale, so re-deriving is the only moment that
+     * path goes back to the store. A re-derive is not guaranteed to reach the store: it reads the file's footer, and
      * {@link #FOOTER_CACHE_TTL} bounds a footer at two of its own periods past the read behind it, because the
      * parsed half is refilled by a reparse of bytes the byte half still holds. The window a fact actually stands
      * in is therefore this value plus twice that one. It nonetheless

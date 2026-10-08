@@ -65,12 +65,12 @@ import java.util.function.LongFunction;
  * </ul>
  * The identity-keyed caches (schema, dataset-aggregate) are bounded by weight + LRU, and by a clock set from
  * {@link ExternalSourceCacheSettings#SCHEMA_TTL} — not for freshness, which identity already gives, but to
- * bound how long a record stands as proof that the credential addressing it could read the object. The
+ * bound how long a derived record is reused before the store is consulted for that object again. The
  * statistics cache takes no clock: its measurements are reachable only beside a schema record, so that clock
  * bounds them too. Each store also refuses a single entry heavier than its own per-entry ceiling, so one
  * oversized harvest cannot flush its working set. The listing cache keeps a short TTL because it holds
- * current-mtime freshness with no identity key to key on. Length and modification time are not cached at all;
- * every single-file resolve asks storage, which is what proves the caller may still read the object.
+ * current-mtime freshness with no identity key to key on, and a file's length and modification time are held
+ * under that same clock.
  */
 public class ExternalSourceCacheService implements Closeable {
 
@@ -210,8 +210,8 @@ public class ExternalSourceCacheService implements Closeable {
         // cannot admit-then-flush that store's working set. See WeightedStore#perEntryCeiling.
 
         // The schema and dataset-aggregate stores expire on write. Being identity-keyed, a changed input
-        // already misses, so the clock is not about freshness: it bounds how long a record stands as proof that
-        // the credential in its address could read the object, which no component of an address can express.
+        // already misses, so the clock is not about freshness: it is an upper bound on how long a derived record
+        // is reused before the store is consulted for that object again.
         // Counting from the write is what makes it a bound: Cache#get touches only the access time, so a
         // steadily queried dataset cannot postpone it. Every write into the schema store follows a read of the
         // object by the query performing it. The dataset aggregate has one write that does not — the per-file
@@ -219,12 +219,11 @@ public class ExternalSourceCacheService implements Closeable {
         // after the last read behind it.
         //
         // The statistics store takes none, and must not. Measurements are read only alongside a schema record
-        // for the same file: either one the resolve has just derived, or one the store still holds, and an
-        // expired entry is not held. So the clock above already bounds when they can be served. A clock here
-        // would also be wrong — a contribution is matched on path, mtime and format config, and the secret
-        // digest sits outside the participants a match compares, so one file is reachable under two credential
-        // sets and one data source's scan re-puts the other's record. The second credential's window would
-        // then be refreshed by the first credential's reads.
+        // for the same file -- either one the resolve has just derived, or one the store still holds, and an
+        // expired entry is not held -- so the clock above already bounds them. A clock here would also reset on
+        // the wrong event: a contribution is matched on path, mtime and format config rather than on the whole
+        // address, so one data source's scan re-puts a record another one reads, and that write would restart a
+        // window the second data source's own reads had nothing to do with.
         this.schemaStore = WeightedStore.of("schema_cache", schemaBudget, SchemaCacheEntry::estimatedBytes, schemaTtl);
         this.statisticsStore = WeightedStore.of("statistics_cache", statisticsBudget, StatisticsRecord::estimatedBytes, null);
 
@@ -336,9 +335,8 @@ public class ExternalSourceCacheService implements Closeable {
 
     /**
      * Returns the cached {@code {length, mtime}} for a path, or computes it through the loader on a miss. The
-     * loader asks storage, which is also what proves the asking credential may still read the object, so an
-     * entry's residency here is how long that proof stands: see the clock in the constructor. With the cache
-     * disabled the loader runs every time, so the probe is not skipped.
+     * loader asks storage, so an entry's residency here is how long that answer stands in for asking again; see
+     * the clock in the constructor. With the cache disabled the loader runs every time.
      */
     public FileMetadata getOrComputeFileMetadata(FileMetadataCacheKey key, CacheLoader<FileMetadataCacheKey, FileMetadata> loader)
         throws Exception {

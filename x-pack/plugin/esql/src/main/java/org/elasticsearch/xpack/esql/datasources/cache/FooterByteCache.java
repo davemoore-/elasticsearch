@@ -33,7 +33,7 @@ import java.util.concurrent.ExecutionException;
  *       is what makes that interval a bound, since reads cannot push it out. Every store into THIS
  *       cache follows a storage read of the object in the same call — the one site that can be handed
  *       bytes this cache served uses {@link #putIfAbsent} — so an entry here lives at most one TTL
- *       past a read the store authorized. The paired {@link ParsedFooterCache} does not share that
+ *       past the read behind it. The paired {@link ParsedFooterCache} does not share that
  *       property; see its Javadoc.</li>
  * </ul>
  *
@@ -203,7 +203,7 @@ public class FooterByteCache {
      * Stores footer bytes and leaves an entry already under the key where it is, write time included. For a
      * caller whose bytes may have come from this cache: storing them again would restart the entry's expiry
      * with no storage request behind it, and expiring on the write is a bound only while every entry's clock
-     * starts at a read the store authorized. Skips an oversized entry as {@link #put} does.
+     * starts at a read of the object. Skips an oversized entry as {@link #put} does.
      *
      * <p>Two callers racing an absent key both store, which costs a redundant write of equal bytes; a check
      * atomic with the write would need a loader that cannot fail, and the entry either way holds the bytes
