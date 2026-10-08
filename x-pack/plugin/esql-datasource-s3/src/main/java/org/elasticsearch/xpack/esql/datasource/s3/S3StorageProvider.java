@@ -32,7 +32,6 @@ import software.amazon.awssdk.services.s3.model.CommonPrefix;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadBucketRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
-import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
@@ -55,7 +54,6 @@ import org.elasticsearch.xpack.esql.datasource.nettycommons.PooledRecvByteBufAll
 import org.elasticsearch.xpack.esql.datasources.ExternalSourceSettings;
 import org.elasticsearch.xpack.esql.datasources.StorageEntry;
 import org.elasticsearch.xpack.esql.datasources.StorageIterator;
-import org.elasticsearch.xpack.esql.datasources.spi.ExternalClientException;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalCredentialsExpiredException;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalException.Condition;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalPlanningIo;
@@ -881,58 +879,6 @@ public class S3StorageProvider implements StorageProvider {
         DiscoveredClients dc = discoveredClients;
         S3Client initialClient = dc != null ? dc.sync() : s3Client;
         return existsWithClient(initialClient, bucket, key, path, true);
-    }
-
-    /**
-     * Whether these credentials can read the object, with its length and last-modified.
-     *
-     * <p>{@code HeadObject}, which transfers no body and is authorized as {@code s3:GetObject} — so a refusal
-     * means the caller cannot read, which is what distinguishes this from a listing's {@code s3:ListBucket}.
-     *
-     * <p>Does not go through {@link S3StorageObject}: that path discovers size with a one-byte range GET so
-     * {@code exists()} and {@code length()} on one object cost a single request. This needs neither the byte nor
-     * the ETag pin a GET establishes.
-     *
-     * <p>A 403 is final — the range-GET fallback {@code exists()} uses needs the same permission.
-     */
-    @Override
-    public StorageEntry probeRead(StoragePath path) throws IOException {
-        validateS3Scheme(path);
-        String bucket = path.host();
-        String key = extractKey(path);
-        DiscoveredClients dc = discoveredClients;
-        S3Client initialClient = dc != null ? dc.sync() : s3Client;
-        return probeReadWithClient(initialClient, bucket, key, path, true);
-    }
-
-    private StorageEntry probeReadWithClient(S3Client client, String bucket, String key, StoragePath path, boolean allowRegionRetry)
-        throws IOException {
-        try {
-            HeadObjectResponse response = client.headObject(HeadObjectRequest.builder().bucket(bucket).key(key).build());
-            Instant lastModified = response.lastModified() != null ? response.lastModified() : Instant.EPOCH;
-            return new StorageEntry(path, response.contentLength() != null ? response.contentLength() : 0L, lastModified);
-        } catch (NoSuchKeyException e) {
-            throw new ExternalClientException(ExternalClientException.Condition.OBJECT_NOT_FOUND, path, "", "");
-        } catch (Exception e) {
-            ExternalCredentialsExpiredException expired = S3FailureDetail.expired(e, "probing read access");
-            if (expired != null) {
-                throw expired;
-            }
-            if (allowRegionRetry && shouldAttemptRegionRetry() && isAuthorizationHeaderMalformed(e)) {
-                String discoveredRegion = discoverRegionViaHeadBucket(client, bucket);
-                if (discoveredRegion != null) {
-                    return probeReadWithClient(cacheDiscoveredClients(discoveredRegion).sync(), bucket, key, path, false);
-                }
-            }
-            if (e instanceof S3Exception s3e && s3e.statusCode() == 403) {
-                throw new ExternalClientException(ExternalClientException.Condition.ACCESS_DENIED, path, "", "");
-            }
-            ExternalUnavailableException unavailable = mapResolveFailure(path, e);
-            if (unavailable != null) {
-                throw unavailable;
-            }
-            throw new IOException("Failed to probe read access for external object: " + S3FailureDetail.of(e) + credentialHint(), e);
-        }
     }
 
     private boolean existsWithClient(S3Client client, String bucket, String key, StoragePath path, boolean allowRegionRetry)

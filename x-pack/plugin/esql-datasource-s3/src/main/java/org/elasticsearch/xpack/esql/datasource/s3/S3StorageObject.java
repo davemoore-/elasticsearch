@@ -701,7 +701,6 @@ public final class S3StorageObject extends AbstractMeteredStorageObject {
         try {
             // Size discovery for the read path: folding it into a GET lets exists() and length() on one object
             // cost a single request. bytes=0-0 over a suffix range — same Content-Range total, cheaper to serve.
-            // Read access is probed by S3StorageProvider#probeRead, not here.
             GetObjectRequest.Builder request = GetObjectRequest.builder().bucket(bucket).key(key).range("bytes=0-0");
             try (var response = getObject(request)) {
                 // Drain the 1-byte body so the HTTP connection returns to the pool
