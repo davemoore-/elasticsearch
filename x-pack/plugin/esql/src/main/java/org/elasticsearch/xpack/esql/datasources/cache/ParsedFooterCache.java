@@ -65,7 +65,12 @@ import java.util.function.ToLongFunction;
  *   <li>Write-based TTL: constructed with the same value as the paired {@link FooterByteCache}
  *       so the two caches age out together. The key carries no modification time, so a same-length
  *       overwrite is served until the entry's own TTL lapses; counting from the write means reads
- *       cannot postpone that, and a store here only follows a parse of bytes storage just served.</li>
+ *       cannot postpone that. Unlike the byte cache, a store here does NOT imply a storage read: this
+ *       cache has the smaller budget, so its entry is the one that evicts first, and the reparse that
+ *       refills it can read its bytes from {@link FooterByteCache}. An entry here therefore dates from
+ *       a reparse, which can be as late as the bytes' own expiry — so a footer survives up to two TTLs
+ *       past the read behind it, and it is that figure, not one TTL, that bounds how long a fact
+ *       derived from a footer stands without going back to the store.</li>
  *   <li>Byte-weighted LRU eviction: parsed metadata structures do not expose an exact byte
  *       size, so each format supplies a structural estimator (row groups × columns for Parquet,
  *       the analogous stripe shape for ORC) against a heap-relative budget

@@ -43,7 +43,7 @@ import static org.elasticsearch.xpack.esql.datasources.S3FixtureUtils.addBlobToF
  * via the listing or schema caches.
  *
  * <p>The bug: {@link org.elasticsearch.xpack.esql.datasources.ExternalSourceResolver} built
- * all three cache keys from the raw config map. For dataset queries, connection settings
+ * both cache keys from the raw config map. For dataset queries, connection settings
  * (endpoint, region) and credentials live in a {@code _datasource} sub-map, not at the top
  * level. The key builders scanned only top-level keys, so every dataset query produced no endpoint and
  * {@code credentialHash=0} — all datasets shared one cache partition.

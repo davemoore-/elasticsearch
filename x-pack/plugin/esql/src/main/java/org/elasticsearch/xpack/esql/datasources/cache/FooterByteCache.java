@@ -30,9 +30,11 @@ import java.util.concurrent.ExecutionException;
  *       configured TTL ({@link ExternalSourceCacheSettings#FOOTER_CACHE_TTL}) after it was stored,
  *       whatever happens in between. The key carries no modification time, so a same-length
  *       overwrite is served until then (see the key-design section below); counting from the write
- *       is what makes that interval a bound, since reads cannot push it out. Every store into this
- *       cache follows a storage read of the object in the same call, so an entry's life can only be
- *       extended by a request the store authorized.</li>
+ *       is what makes that interval a bound, since reads cannot push it out. Every store into THIS
+ *       cache follows a storage read of the object in the same call — the one site that can be handed
+ *       bytes this cache served uses {@link #putIfAbsent} — so an entry here lives at most one TTL
+ *       past a read the store authorized. The paired {@link ParsedFooterCache} does not share that
+ *       property; see its Javadoc.</li>
  * </ul>
  *
  * <h2>Why one instance per root format reader instead of per-query?</h2>

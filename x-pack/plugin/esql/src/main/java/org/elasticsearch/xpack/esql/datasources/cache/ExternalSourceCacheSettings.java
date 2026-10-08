@@ -93,9 +93,9 @@ public final class ExternalSourceCacheSettings {
         Setting.Property.NodeScope
     );
 
-    // Only the listing cache carries a time-based refresh: it discovers file identity and has no per-file
-    // key to invalidate on. The schema and dataset-aggregate caches invalidate by identity; SCHEMA_TTL bounds
-    // how long they may serve, which is a different question from whether their inputs moved.
+    // This is the only time-based REFRESH: the listing discovers file identity and has no per-file key to
+    // invalidate on. The schema and dataset-aggregate caches invalidate by identity, and SCHEMA_TTL bounds how
+    // long they may serve, which is a different question from whether their inputs moved.
     // Default is five minutes after write (the deprecated key's default; this key falls back to it). A file
     // added or removed becomes visible on the next query once that elapses. Lower the setting for faster
     // visibility. Re-lists stay query-triggered. File length and mtime are no longer cached at all — they come
@@ -114,8 +114,10 @@ public final class ExternalSourceCacheSettings {
      * <p>
      * Only the glob read path *needs* it — a single-file read probes storage every query, while proving read on
      * each file of a large listing every query does not scale, so re-deriving is the only moment access is
-     * re-checked there. That holds because {@link #FOOTER_CACHE_TTL} expires on write: a re-derive past it must
-     * read the footer from the store again rather than from a cache the previous query refreshed. It nonetheless
+     * re-checked there. A re-derive is not guaranteed to reach the store: it reads the file's footer, and
+     * {@link #FOOTER_CACHE_TTL} bounds a footer at two of its own periods past the read behind it, because the
+     * parsed half is refilled by a reparse of bytes the byte half still holds. The window a fact actually stands
+     * in is therefore this value plus twice that one. It nonetheless
      * applies to every entry in these stores: a per-file key and a single-file key are indistinguishable here,
      * both carrying a null file-set fingerprint, so the window cannot be scoped
      * to one rail from inside the cache. Single-file entries therefore also re-derive each period, which costs a

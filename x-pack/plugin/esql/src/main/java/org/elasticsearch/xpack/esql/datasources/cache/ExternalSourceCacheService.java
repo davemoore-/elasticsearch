@@ -56,18 +56,18 @@ import java.util.function.LongFunction;
  *       so the measurements cannot evict the schema records they were measured against. The larger of the two
  *       because a harvested {@code _stats.*} map outweighs the schema it was measured against.</li>
  *   <li>Dataset-aggregate cache (~2% of budget) — the memoized whole-dataset row count, keyed by the
- *       file-set fingerprint. No time expiry; kept separate so per-file churn cannot evict it.</li>
- *   <li>File-metadata cache (count-bounded, listing TTL, five minutes by default) — {@code {length, mtime}}
- *       per path, so a repeated resolve skips the stat. Like listing it is freshness-discovery (it holds the
- *       CURRENT mtime, which gates the identity-keyed caches above), so it keeps that TTL.</li>
+ *       file-set fingerprint. Kept separate so per-file churn cannot evict it.</li>
  *   <li>Listing cache (~78% of budget, five minutes by default) — the file set under a prefix, isolated by
  *       credential hash. Discovers file identity and has no per-file key to invalidate on, hence the TTL.</li>
  * </ul>
- * The identity-keyed caches (schema, dataset-aggregate) are bounded by weight + LRU, never by a clock — a
- * timer would only discard still-valid, expensively harvested entries. Both also refuse a single entry
- * heavier than a quarter of that cache's own budget so one oversized harvest cannot flush the working set.
- * The discovery caches (file-metadata, listing) keep a short TTL because they hold current-mtime freshness
- * with no identity key to key on.
+ * The identity-keyed caches (schema, dataset-aggregate) are bounded by weight + LRU, and by a clock set from
+ * {@link ExternalSourceCacheSettings#SCHEMA_TTL} — not for freshness, which identity already gives, but to
+ * bound how long a record stands as proof that the credential addressing it could read the object. The
+ * statistics cache takes no clock: its measurements are reachable only beside a schema record, so that clock
+ * bounds them too. Each store also refuses a single entry heavier than its own per-entry ceiling, so one
+ * oversized harvest cannot flush its working set. The listing cache keeps a short TTL because it holds
+ * current-mtime freshness with no identity key to key on. Length and modification time are not cached at all;
+ * every single-file resolve asks storage, which is what proves the caller may still read the object.
  */
 public class ExternalSourceCacheService implements Closeable {
 
